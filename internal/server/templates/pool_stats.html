@@ -1,0 +1,18 @@
+{{define "content"}}
+<h2>Pool Stats</h2>
+{{if .Error}}
+<p style="color:#ff8080;">Failed to load pool stats: {{.Error}}</p>
+{{else}}
+<div class="stat-grid">
+    <div class="stat-card"><div class="label">Hash Rate</div><div class="value">{{.Stats.HashRateDisplay}}</div></div>
+    <div class="stat-card"><div class="label">Miners</div><div class="value">{{.Stats.Miners}}</div></div>
+    <div class="stat-card"><div class="label">Round Hashes</div><div class="value">{{.Stats.RoundHashes}}</div></div>
+    <div class="stat-card"><div class="label">Total Hashes</div><div class="value">{{.Stats.TotalHashes}}</div></div>
+    <div class="stat-card"><div class="label">Total Blocks Found</div><div class="value">{{.Stats.TotalBlocksFound}}</div></div>
+    <div class="stat-card"><div class="label">Last Block Found</div><div class="value">#{{.Stats.LastBlockFound}}</div></div>
+    <div class="stat-card"><div class="label">Last Block Found At</div><div class="value">{{.Stats.LastBlockFoundTimeDisplay}}</div></div>
+    <div class="stat-card"><div class="label">Last Payment Run</div><div class="value">{{.Stats.LastPaymentDisplay}}</div></div>
+</div>
+<p style="color:#888;">Source: {{.BaseURL}}</p>
+{{end}}
+{{end}}

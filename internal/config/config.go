@@ -60,3 +60,18 @@ func HTTPListenAddr() string {
 	}
 	return ":8080"
 }
+
+// DefaultPoolStatsBaseURL points at the pool.rxt.tari.jagtech.io nodejs-pool instance.
+// Override with TARI_EXPLORER_POOL_STATS_BASE_URL or the -pool-stats-base-url flag -
+// this backend is expected to be rebuilt/replaced over time, so never hardcode this URL
+// anywhere outside this one default.
+const DefaultPoolStatsBaseURL = "https://pool.rxt.tari.jagtech.io"
+
+// PoolStatsBaseURL returns TARI_EXPLORER_POOL_STATS_BASE_URL if set, else
+// DefaultPoolStatsBaseURL.
+func PoolStatsBaseURL() string {
+	if v := os.Getenv("TARI_EXPLORER_POOL_STATS_BASE_URL"); v != "" {
+		return v
+	}
+	return DefaultPoolStatsBaseURL
+}

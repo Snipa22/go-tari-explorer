@@ -15,10 +15,17 @@
         #load-more-row td { text-align: center; padding: 1rem; }
         button { background: #222; color: #e6e6e6; border: 1px solid #444; padding: 0.5rem 1rem; cursor: pointer; }
         button:hover { background: #333; }
+        nav { margin-bottom: 1rem; color: #999; }
+        nav a { margin-right: 0.3rem; }
+        .stat-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 1rem; margin: 1.5rem 0; }
+        .stat-card { border: 1px solid #333; padding: 1rem; background: #17171b; }
+        .stat-card .label { color: #999; font-size: 0.85rem; }
+        .stat-card .value { font-size: 1.4rem; color: #7fffa0; }
     </style>
 </head>
 <body>
 <h1><a href="/">go-tari-explorer</a></h1>
+<nav><a href="/">Blocks</a> | <a href="/pool-stats">Pool Stats</a></nav>
 {{block "content" .}}{{end}}
 </body>
 </html>

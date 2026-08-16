@@ -19,6 +19,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/Snipa22/go-tari-explorer/internal/db"
+	"github.com/Snipa22/go-tari-explorer/internal/poolstats"
 )
 
 //go:embed templates/*.html
@@ -34,15 +35,20 @@ var funcs = template.FuncMap{
 
 // Server holds the dependencies needed to serve HTTP requests.
 type Server struct {
-	DB         *db.DB
-	listTmpl   *template.Template
-	detailTmpl *template.Template
-	rowsTmpl   *template.Template
+	DB        *db.DB
+	PoolStats poolstats.PoolStatsProvider
+	// PoolStatsBaseURL is displayed on the pool-stats page as a "source" attribution -
+	// purely informational, not used for any request.
+	PoolStatsBaseURL string
+	listTmpl         *template.Template
+	detailTmpl       *template.Template
+	rowsTmpl         *template.Template
+	poolStatsTmpl    *template.Template
 }
 
 // New parses the embedded templates and constructs a Server. Returns an error if the
 // templates fail to parse (a build-time programming error, not a runtime/request error).
-func New(database *db.DB) (*Server, error) {
+func New(database *db.DB, poolStatsProvider poolstats.PoolStatsProvider, poolStatsBaseURL string) (*Server, error) {
 	listTmpl, err := template.New("layout.html").Funcs(funcs).ParseFS(templateFS, "templates/layout.html", "templates/blocks_list.html")
 	if err != nil {
 		return nil, fmt.Errorf("server: parse blocks list templates: %w", err)
@@ -55,7 +61,19 @@ func New(database *db.DB) (*Server, error) {
 	if err != nil {
 		return nil, fmt.Errorf("server: parse rows template: %w", err)
 	}
-	return &Server{DB: database, listTmpl: listTmpl, detailTmpl: detailTmpl, rowsTmpl: rowsTmpl}, nil
+	poolStatsTmpl, err := template.New("layout.html").Funcs(funcs).ParseFS(templateFS, "templates/layout.html", "templates/pool_stats.html")
+	if err != nil {
+		return nil, fmt.Errorf("server: parse pool stats template: %w", err)
+	}
+	return &Server{
+		DB:               database,
+		PoolStats:        poolStatsProvider,
+		PoolStatsBaseURL: poolStatsBaseURL,
+		listTmpl:         listTmpl,
+		detailTmpl:       detailTmpl,
+		rowsTmpl:         rowsTmpl,
+		poolStatsTmpl:    poolStatsTmpl,
+	}, nil
 }
 
 // Handler builds the top-level http.Handler with all routes registered.
@@ -64,6 +82,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /", s.handleBlocksList)
 	mux.HandleFunc("GET /blocks/partial", s.handleBlocksPartial)
 	mux.HandleFunc("GET /blocks/{height}", s.handleBlockDetail)
+	mux.HandleFunc("GET /pool-stats", s.handlePoolStats)
 	return mux
 }
 
@@ -128,6 +147,79 @@ func (s *Server) handleBlocksPartial(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := s.rowsTmpl.ExecuteTemplate(w, "rows", toBlockViews(blocks)); err != nil {
 		log.Printf("server: render blocks partial: %v", err)
+	}
+}
+
+// poolStatsView adapts poolstats.PoolStats for template rendering (human-friendly
+// hash-rate/timestamp formatting), keeping presentation concerns out of the poolstats
+// package itself.
+type poolStatsView struct {
+	poolstats.PoolStats
+}
+
+// HashRateDisplay formats HashRate with a H/s/KH/s/MH/s/GH/s suffix.
+func (v poolStatsView) HashRateDisplay() string {
+	return formatHashRate(v.HashRate)
+}
+
+func formatHashRate(hashRate int64) string {
+	const unit = 1000.0
+	rate := float64(hashRate)
+	if rate < unit {
+		return fmt.Sprintf("%d H/s", hashRate)
+	}
+	units := []string{"KH/s", "MH/s", "GH/s", "TH/s"}
+	div, exp := unit, 0
+	for r := rate / unit; r >= unit && exp < len(units)-1; r /= unit {
+		div *= unit
+		exp++
+	}
+	return fmt.Sprintf("%.2f %s", rate/div, units[exp])
+}
+
+// LastBlockFoundTimeDisplay formats LastBlockFoundTime as a human-readable UTC
+// timestamp, or "never" if unset.
+func (v poolStatsView) LastBlockFoundTimeDisplay() string {
+	if v.LastBlockFoundTime == 0 {
+		return "never"
+	}
+	return time.Unix(v.LastBlockFoundTime, 0).UTC().Format("2006-01-02 15:04:05 UTC")
+}
+
+// LastPaymentDisplay formats LastPayment as a human-readable UTC timestamp, or "never"
+// if unset.
+func (v poolStatsView) LastPaymentDisplay() string {
+	if v.LastPayment == 0 {
+		return "never"
+	}
+	return time.Unix(v.LastPayment, 0).UTC().Format("2006-01-02 15:04:05 UTC")
+}
+
+// handlePoolStats renders the pool-wide stats page via s.PoolStats (a
+// poolstats.PoolStatsProvider). If PoolStats is unconfigured (nil), or the fetch
+// fails, the page still renders with an inline error message rather than a 500 - a
+// pool-backend outage shouldn't be treated as a server error.
+func (s *Server) handlePoolStats(w http.ResponseWriter, r *http.Request) {
+	data := struct {
+		Stats   poolStatsView
+		Error   string
+		BaseURL string
+	}{BaseURL: s.PoolStatsBaseURL}
+
+	if s.PoolStats == nil {
+		data.Error = "pool stats provider not configured"
+	} else {
+		stats, err := s.PoolStats.GetStats(r.Context())
+		if err != nil {
+			log.Printf("server: get pool stats: %v", err)
+			data.Error = "unable to reach pool stats backend"
+		} else {
+			data.Stats = poolStatsView{stats}
+		}
+	}
+
+	if err := s.poolStatsTmpl.Execute(w, data); err != nil {
+		log.Printf("server: render pool stats: %v", err)
 	}
 }
 
