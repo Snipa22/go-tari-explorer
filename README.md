@@ -18,7 +18,8 @@ cmd/server    -> internal/server  -> internal/db         (Postgres read, paginat
 - **`internal/poolattr`** — rebuilds (not ports verbatim) the pool-attribution logic from `go-tari-grpc-lib/cmd/blockWinners/main.go` into a structured `BlockAttribution` struct (`BlockHeight`, `PowAlgo`, `PoolTag`, `RawExtra`, `IsOwnPool`) instead of a `fmt.Println` CLI report. Known pool prefixes (own tags `WUF*`, external pools like `pool.kryptex.com`, `LuckyPool`, `hash2coin`, etc.) live in a lookup table with a documented fallback bucket for anything unrecognized.
 - **`internal/db`** — Postgres access plus a small hand-rolled embedded-SQL migration runner (see "Migrations" below for why this isn't golang-migrate yet).
 - **`internal/indexer`** — walks blocks in batches, runs attribution, upserts into Postgres. Supports a one-shot `-mode=backfill` and a polling `-mode=follow` ("keep following the tip").
-- **`internal/server`** — `net/http` + `html/template`, HTMX (loaded from a CDN `<script>` tag, no separate JS build step) driving the blocks-list "load more" pagination.
+- **`internal/server`** — `net/http` + `html/template`, HTMX (loaded from a CDN `<script>` tag, no separate JS build step) driving the blocks-list "load more" pagination, plus a pool-stats page (see below).
+- **`internal/poolstats`** — HTTP client for a mining pool's stats API, behind a small `PoolStatsProvider` interface so `internal/server` never depends on a specific backend's JSON shape. The current implementation (`HTTPClient`) talks to a nodejs-pool/node-cryptonote-pool-derived backend (live at `pool.rxt.tari.jagtech.io`) via `GET /api/pool/stats`. This backend is expected to be rebuilt/replaced over time (ties to a separate SupportXMR Go-rewrite effort) — swap in a new `PoolStatsProvider` implementation rather than growing `HTTPClient` to match a new shape.
 
 ## Schema (v1, minimal-viable)
 
@@ -37,9 +38,10 @@ All config is env var / CLI flag driven with local-dev defaults — no hardcoded
 
 | Setting | Flag | Env var | Default |
 |---|---|---|---|
-| Postgres DSN | `-postgres-dsn` | `TARI_EXPLORER_POSTGRES_DSN` | `postgres://tari_explorer:tari_explorer@localhost:5432/tari_explorer?sslmode=disable` |
+| Postgres DSN | `-postgres-dsn` | `TARI_EXPLORER_POSTGRES_DSN` | `postgres://tari_explorer:***@localhost:5432/tari_explorer?sslmode=disable` |
 | Base-node GRPC hosts (comma-separated) | `-base-node-grpc-hosts` | `TARI_EXPLORER_NODE_HOSTS` | `node-pool.tari.jagtech.io:18102` |
 | HTTP listen address (server only) | `-http-addr` | `TARI_EXPLORER_HTTP_ADDR` | `:8080` |
+| Pool stats API base URL (server only) | `-pool-stats-base-url` | `TARI_EXPLORER_POOL_STATS_BASE_URL` | `https://pool.rxt.tari.jagtech.io` |
 
 ## Running locally
 
@@ -59,6 +61,14 @@ go run ./cmd/server -http-addr=:8080
 
 Point `-base-node-grpc-hosts` (or `TARI_EXPLORER_NODE_HOSTS`) at a comma-separated list for redundancy, e.g. `node1.example.com:18102,node2.example.com:18102`.
 
+## Pool Stats page
+
+`GET /pool-stats` renders pool-wide statistics (hash rate, connected miners, round hashes, total hashes/blocks found, last block/payment timestamps) fetched live from the configured pool stats backend (`-pool-stats-base-url` / `TARI_EXPLORER_POOL_STATS_BASE_URL`, default `https://pool.rxt.tari.jagtech.io`). A nav link to it is on every page.
+
+This intentionally only surfaces pool-wide numbers — no per-miner/per-worker/per-address data is fetched, modeled, or displayed anywhere. Tari is MimbleWimble (no public address model), and no per-miner endpoint is confirmed to exist on the current backend; this is a deliberate scope boundary, not a gap to fill later without re-confirming a real endpoint first.
+
+`internal/poolstats.PoolStatsProvider` is the seam behind this page — the current nodejs-pool-derived `HTTPClient` implementation is expected to be swapped out over time as the backend it talks to gets rebuilt/replaced.
+
 ## What's deliberately deferred (not in v1)
 
 - Per-kernel/per-transaction detail beyond the `block_kernels` summary row.
@@ -66,6 +76,8 @@ Point `-base-node-grpc-hosts` (or `TARI_EXPLORER_NODE_HOSTS`) at a comma-separat
 - `golang-migrate`-style down-migrations/dirty-state recovery (see "Migrations" above).
 - Pagination beyond simple height-cursor "load more" (no jump-to-page, no search).
 - Real difficulty lookups are best-effort per block via `GetNetworkDifficulty`; a failed lookup doesn't fail the whole block, it just leaves `difficulty = 0`.
+- Pool-stats page only surfaces `/api/pool/stats`; `/api/network/stats` and `/api/pool/blocks` (and the `finder` field on the latter, which is currently a hardcoded placeholder server-side) are not wired up yet.
+- No per-miner/per-worker/per-address pool data anywhere (privacy — Tari is MimbleWimble, no public address model; no such endpoint is confirmed to exist regardless).
 
 ## License
 

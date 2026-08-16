@@ -14,6 +14,7 @@ import (
 
 	"github.com/Snipa22/go-tari-explorer/internal/config"
 	"github.com/Snipa22/go-tari-explorer/internal/db"
+	"github.com/Snipa22/go-tari-explorer/internal/poolstats"
 	"github.com/Snipa22/go-tari-explorer/internal/server"
 )
 
@@ -22,6 +23,7 @@ const shutdownTimeout = 10 * time.Second
 func main() {
 	postgresDSN := flag.String("postgres-dsn", config.PostgresDSN(), "Postgres connection string (env: TARI_EXPLORER_POSTGRES_DSN)")
 	httpAddr := flag.String("http-addr", config.HTTPListenAddr(), "HTTP listen address (env: TARI_EXPLORER_HTTP_ADDR)")
+	poolStatsBaseURL := flag.String("pool-stats-base-url", config.PoolStatsBaseURL(), "Base URL of the nodejs-pool stats API (env: TARI_EXPLORER_POOL_STATS_BASE_URL)")
 	flag.Parse()
 
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
@@ -37,7 +39,8 @@ func main() {
 		log.Fatalf("server: migrate: %v", err)
 	}
 
-	srv, err := server.New(database)
+	poolStatsClient := poolstats.NewHTTPClient(*poolStatsBaseURL, nil)
+	srv, err := server.New(database, poolStatsClient, *poolStatsBaseURL)
 	if err != nil {
 		log.Fatalf("server: %v", err)
 	}
