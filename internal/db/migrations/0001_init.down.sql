@@ -1,0 +1,2 @@
+DROP TABLE IF EXISTS block_kernels;
+DROP TABLE IF EXISTS blocks;

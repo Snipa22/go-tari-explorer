@@ -1,0 +1,24 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>go-tari-explorer</title>
+    <script src="https://unpkg.com/htmx.org@1.9.12"></script>
+    <style>
+        body { font-family: monospace; margin: 2rem; background: #0f0f12; color: #e6e6e6; }
+        a { color: #7cc7ff; }
+        table { border-collapse: collapse; width: 100%; }
+        th, td { text-align: left; padding: 0.4rem 0.8rem; border-bottom: 1px solid #333; }
+        th { color: #999; }
+        .pool-own { color: #7fffa0; }
+        .pool-unknown { color: #888; }
+        #load-more-row td { text-align: center; padding: 1rem; }
+        button { background: #222; color: #e6e6e6; border: 1px solid #444; padding: 0.5rem 1rem; cursor: pointer; }
+        button:hover { background: #333; }
+    </style>
+</head>
+<body>
+<h1><a href="/">go-tari-explorer</a></h1>
+{{block "content" .}}{{end}}
+</body>
+</html>

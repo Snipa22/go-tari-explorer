@@ -1,0 +1,38 @@
+{{define "content"}}
+<h2>Blocks</h2>
+<table>
+    <thead>
+    <tr><th>Height</th><th>Hash</th><th>Timestamp</th><th>Algo</th><th>Difficulty</th><th>Kernels</th><th>Outputs</th><th>Pool</th></tr>
+    </thead>
+    <tbody id="blocks-body">
+    {{template "rows" .Blocks}}
+    </tbody>
+</table>
+{{end}}
+
+{{define "rows"}}
+{{range .}}
+<tr>
+    <td><a href="/blocks/{{.Height}}">{{.Height}}</a></td>
+    <td>{{.Hash}}</td>
+    <td>{{.TimeString}}</td>
+    <td>{{.PowAlgo}}</td>
+    <td>{{.Difficulty}}</td>
+    <td>{{.KernelCount}}</td>
+    <td>{{.OutputCount}}</td>
+    <td class="{{.PoolCSSClass}}">{{.PoolDisplay}}</td>
+</tr>
+{{end}}
+{{if .}}
+{{$last := index . (sub (len .) 1)}}
+<tr id="load-more-row">
+    <td colspan="8">
+        <button hx-get="/blocks/partial?before={{$last.Height}}"
+                hx-target="#load-more-row"
+                hx-swap="outerHTML">
+            Load more
+        </button>
+    </td>
+</tr>
+{{end}}
+{{end}}

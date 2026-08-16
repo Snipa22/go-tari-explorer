@@ -1,0 +1,15 @@
+{{define "content"}}
+<h2>Block {{.Block.Height}}</h2>
+<table>
+    <tr><th>Height</th><td>{{.Block.Height}}</td></tr>
+    <tr><th>Hash</th><td>{{.Block.Hash}}</td></tr>
+    <tr><th>Prev Hash</th><td><a href="/blocks/{{.PrevHeight}}">{{.Block.PrevHash}}</a></td></tr>
+    <tr><th>Timestamp</th><td>{{.Block.TimeString}}</td></tr>
+    <tr><th>PoW Algo</th><td>{{.Block.PowAlgo}}</td></tr>
+    <tr><th>Difficulty</th><td>{{.Block.Difficulty}}</td></tr>
+    <tr><th>Kernel Count</th><td>{{.Block.KernelCount}}</td></tr>
+    <tr><th>Output Count</th><td>{{.Block.OutputCount}}</td></tr>
+    <tr><th>Pool</th><td class="{{.Block.PoolCSSClass}}">{{.Block.PoolDisplay}}</td></tr>
+</table>
+<p><a href="/">&larr; back to blocks list</a></p>
+{{end}}
