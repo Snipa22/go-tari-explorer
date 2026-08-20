@@ -150,15 +150,29 @@ func (ix *Indexer) indexBlock(ctx context.Context, block *tari_generated.Block) 
 	}
 
 	row := db.Block{
-		Height:      header.GetHeight(),
-		Hash:        fmt.Sprintf("%x", header.GetHash()),
-		PrevHash:    fmt.Sprintf("%x", header.GetPrevHash()),
-		Timestamp:   int64(header.GetTimestamp()),
-		PowAlgo:     string(attribution.PowAlgo),
-		Difficulty:  difficulty,
-		KernelCount: int32(len(kernels)),
-		OutputCount: int32(len(outputs)),
-		PoolTag:     poolTag,
+		Height:            header.GetHeight(),
+		Hash:              fmt.Sprintf("%x", header.GetHash()),
+		Version:           header.GetVersion(),
+		PrevHash:          fmt.Sprintf("%x", header.GetPrevHash()),
+		Timestamp:         int64(header.GetTimestamp()),
+		OutputMr:          header.GetOutputMr(),
+		BlockOutputMr:     header.GetBlockOutputMr(),
+		KernelMr:          header.GetKernelMr(),
+		InputMr:           header.GetInputMr(),
+		TotalKernelOffset: header.GetTotalKernelOffset(),
+		Nonce:             header.GetNonce(),
+		KernelMmrSize:     header.GetKernelMmrSize(),
+		OutputMmrSize:     header.GetOutputMmrSize(),
+		TotalScriptOffset: header.GetTotalScriptOffset(),
+		ValidatorNodeMr:   header.GetValidatorNodeMr(),
+		ValidatorNodeSize: header.GetValidatorNodeSize(),
+		PowAlgoRaw:        rawAlgo,
+		PowData:           header.GetPow().GetPowData(),
+		PowAlgo:           string(attribution.PowAlgo),
+		Difficulty:        difficulty,
+		KernelCount:       int32(len(kernels)),
+		OutputCount:       int32(len(outputs)),
+		PoolTag:           poolTag,
 	}
 	return ix.DB.UpsertBlock(ctx, row)
 }

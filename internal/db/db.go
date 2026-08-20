@@ -103,13 +103,48 @@ func (d *DB) Migrate(ctx context.Context) error {
 	return nil
 }
 
-// Block is the row shape for the `blocks` table.
+// Block is the row shape for the `blocks` table: a full decomposition of the real Tari
+// protobuf BlockHeader message (github.com/Snipa22/go-tari-grpc-lib/v3/tari_generated,
+// block.proto) plus its nested ProofOfWork message (1:1 per block, so flattened into
+// this same row rather than a separate table, with a pow_ prefix on its two fields),
+// plus the pre-existing block-level summary fields (string PowAlgo classification,
+// PoolTag, KernelCount/OutputCount) that are derived from the block body rather than
+// the header itself.
+//
+// Hash/PrevHash stay hex-encoded strings (as originally stored, and as rendered
+// verbatim by internal/server's templates) rather than the proto's raw []byte, to avoid
+// a breaking change to the UI layer. Every other BlockHeader/ProofOfWork field is carried
+// as its real wire type: []byte for proto `bytes` fields, uint64/uint32 for proto
+// integer fields.
 type Block struct {
-	Height      uint64
-	Hash        string
-	PrevHash    string
-	Timestamp   int64
-	PowAlgo     string
+	// BlockHeader fields (github.com/Snipa22/go-tari-grpc-lib/v3/tari_generated.BlockHeader).
+	Height            uint64
+	Hash              string // hex-encoded BlockHeader.Hash
+	Version           uint32
+	PrevHash          string // hex-encoded BlockHeader.PrevHash
+	Timestamp         int64
+	OutputMr          []byte
+	BlockOutputMr     []byte
+	KernelMr          []byte
+	InputMr           []byte
+	TotalKernelOffset []byte
+	Nonce             uint64
+	KernelMmrSize     uint64
+	OutputMmrSize     uint64
+	TotalScriptOffset []byte
+	ValidatorNodeMr   []byte
+	ValidatorNodeSize uint64
+
+	// ProofOfWork fields (BlockHeader.Pow), flattened with a pow_ prefix. PowAlgoRaw is
+	// the raw wire id (0=RXM, 1=SHA3X, 2=RXT, 3=C29); PowAlgo below is the classified
+	// string built from it via internal/poolattr.AlgoFromRaw - both are kept, see
+	// migrations/0002_block_header_decomposition.up.sql.
+	PowAlgoRaw uint64
+	PowData    []byte
+
+	// Block-level summary fields, derived from the block body (AggregateBody), not the
+	// header - pre-existing from 0001_init, unchanged by this decomposition.
+	PowAlgo     string // "RXM" | "RXT" | "C29" | "SHA3X" (see internal/poolattr)
 	Difficulty  int64
 	KernelCount int32
 	OutputCount int32
@@ -120,22 +155,70 @@ type Block struct {
 // indexer for both backfill and tip-follow modes.
 func (d *DB) UpsertBlock(ctx context.Context, b Block) error {
 	_, err := d.Pool.Exec(ctx, `
-		INSERT INTO blocks (height, hash, prev_hash, "timestamp", pow_algo, difficulty, kernel_count, output_count, pool_tag)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+		INSERT INTO blocks (
+			height, hash, version, prev_hash, "timestamp",
+			output_mr, block_output_mr, kernel_mr, input_mr, total_kernel_offset, nonce,
+			pow_algo_raw, pow_data,
+			kernel_mmr_size, output_mmr_size, total_script_offset, validator_node_mr, validator_node_size,
+			pow_algo, difficulty, kernel_count, output_count, pool_tag
+		)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23)
 		ON CONFLICT (height) DO UPDATE SET
 			hash = EXCLUDED.hash,
+			version = EXCLUDED.version,
 			prev_hash = EXCLUDED.prev_hash,
 			"timestamp" = EXCLUDED."timestamp",
+			output_mr = EXCLUDED.output_mr,
+			block_output_mr = EXCLUDED.block_output_mr,
+			kernel_mr = EXCLUDED.kernel_mr,
+			input_mr = EXCLUDED.input_mr,
+			total_kernel_offset = EXCLUDED.total_kernel_offset,
+			nonce = EXCLUDED.nonce,
+			pow_algo_raw = EXCLUDED.pow_algo_raw,
+			pow_data = EXCLUDED.pow_data,
+			kernel_mmr_size = EXCLUDED.kernel_mmr_size,
+			output_mmr_size = EXCLUDED.output_mmr_size,
+			total_script_offset = EXCLUDED.total_script_offset,
+			validator_node_mr = EXCLUDED.validator_node_mr,
+			validator_node_size = EXCLUDED.validator_node_size,
 			pow_algo = EXCLUDED.pow_algo,
 			difficulty = EXCLUDED.difficulty,
 			kernel_count = EXCLUDED.kernel_count,
 			output_count = EXCLUDED.output_count,
 			pool_tag = EXCLUDED.pool_tag
-	`, b.Height, b.Hash, b.PrevHash, b.Timestamp, b.PowAlgo, b.Difficulty, b.KernelCount, b.OutputCount, b.PoolTag)
+	`,
+		b.Height, b.Hash, b.Version, b.PrevHash, b.Timestamp,
+		b.OutputMr, b.BlockOutputMr, b.KernelMr, b.InputMr, b.TotalKernelOffset, b.Nonce,
+		b.PowAlgoRaw, b.PowData,
+		b.KernelMmrSize, b.OutputMmrSize, b.TotalScriptOffset, b.ValidatorNodeMr, b.ValidatorNodeSize,
+		b.PowAlgo, b.Difficulty, b.KernelCount, b.OutputCount, b.PoolTag,
+	)
 	if err != nil {
 		return fmt.Errorf("db: upsert block %d: %w", b.Height, err)
 	}
 	return nil
+}
+
+// blockColumns is the shared column list (and scan order) used by ListBlocks and
+// GetBlock, so the two queries can't silently drift out of sync with each other or
+// with scanBlockRow below.
+const blockColumns = `
+	height, hash, version, prev_hash, "timestamp",
+	output_mr, block_output_mr, kernel_mr, input_mr, total_kernel_offset, nonce,
+	pow_algo_raw, pow_data,
+	kernel_mmr_size, output_mmr_size, total_script_offset, validator_node_mr, validator_node_size,
+	pow_algo, difficulty, kernel_count, output_count, pool_tag
+`
+
+// scanBlockRow scans a row shaped like blockColumns into a Block.
+func scanBlockRow(row pgx.Row, b *Block) error {
+	return row.Scan(
+		&b.Height, &b.Hash, &b.Version, &b.PrevHash, &b.Timestamp,
+		&b.OutputMr, &b.BlockOutputMr, &b.KernelMr, &b.InputMr, &b.TotalKernelOffset, &b.Nonce,
+		&b.PowAlgoRaw, &b.PowData,
+		&b.KernelMmrSize, &b.OutputMmrSize, &b.TotalScriptOffset, &b.ValidatorNodeMr, &b.ValidatorNodeSize,
+		&b.PowAlgo, &b.Difficulty, &b.KernelCount, &b.OutputCount, &b.PoolTag,
+	)
 }
 
 // ListBlocks returns up to limit blocks ordered by height descending, starting strictly
@@ -143,7 +226,7 @@ func (d *DB) UpsertBlock(ctx context.Context, b Block) error {
 // Used to drive the paginated / HTMX "load more" blocks-list page.
 func (d *DB) ListBlocks(ctx context.Context, beforeHeight int64, limit int) ([]Block, error) {
 	rows, err := d.Pool.Query(ctx, `
-		SELECT height, hash, prev_hash, "timestamp", pow_algo, difficulty, kernel_count, output_count, pool_tag
+		SELECT `+blockColumns+`
 		FROM blocks
 		WHERE height < $1
 		ORDER BY height DESC
@@ -157,7 +240,7 @@ func (d *DB) ListBlocks(ctx context.Context, beforeHeight int64, limit int) ([]B
 	var out []Block
 	for rows.Next() {
 		var b Block
-		if err := rows.Scan(&b.Height, &b.Hash, &b.PrevHash, &b.Timestamp, &b.PowAlgo, &b.Difficulty, &b.KernelCount, &b.OutputCount, &b.PoolTag); err != nil {
+		if err := scanBlockRow(rows, &b); err != nil {
 			return nil, fmt.Errorf("db: list blocks: scan: %w", err)
 		}
 		out = append(out, b)
@@ -168,11 +251,11 @@ func (d *DB) ListBlocks(ctx context.Context, beforeHeight int64, limit int) ([]B
 // GetBlock returns a single block by height, or pgx.ErrNoRows if it doesn't exist.
 func (d *DB) GetBlock(ctx context.Context, height uint64) (Block, error) {
 	var b Block
-	err := d.Pool.QueryRow(ctx, `
-		SELECT height, hash, prev_hash, "timestamp", pow_algo, difficulty, kernel_count, output_count, pool_tag
+	err := scanBlockRow(d.Pool.QueryRow(ctx, `
+		SELECT `+blockColumns+`
 		FROM blocks
 		WHERE height = $1
-	`, height).Scan(&b.Height, &b.Hash, &b.PrevHash, &b.Timestamp, &b.PowAlgo, &b.Difficulty, &b.KernelCount, &b.OutputCount, &b.PoolTag)
+	`, height), &b)
 	if err != nil {
 		if err == pgx.ErrNoRows {
 			return Block{}, pgx.ErrNoRows
