@@ -195,3 +195,56 @@ func (d *DB) MaxIndexedHeight(ctx context.Context) (uint64, error) {
 	}
 	return *max, nil
 }
+
+// AlgoBucketRow is one row of the height-bucketed pow-algo aggregation report: a
+// [BucketStart, BucketEnd] inclusive height range, plus the count of blocks in that
+// range attributed to each of the four known internal/poolattr.PowAlgo values.
+type AlgoBucketRow struct {
+	BucketStart uint64
+	BucketEnd   uint64
+	RXM         int64
+	RXT         int64
+	C29         int64
+	SHA3X       int64
+}
+
+// AlgoBucketCounts groups blocks in [fromHeight, toHeight] (inclusive) into consecutive
+// buckets of bucketSize heights (bucket boundaries aligned to multiples of bucketSize,
+// e.g. bucket-size 1000 gives buckets [0,999], [1000,1999], ...) and counts, per bucket,
+// how many blocks were mined on each pow_algo. The aggregation is done entirely in
+// Postgres via integer bucketing + FILTER-clause conditional counts - this table can
+// have tens of thousands of rows, so we never pull raw rows into Go to aggregate here.
+// Results are ordered by bucket_start ascending. bucketSize must be > 0.
+func (d *DB) AlgoBucketCounts(ctx context.Context, bucketSize uint64, fromHeight, toHeight uint64) ([]AlgoBucketRow, error) {
+	if bucketSize == 0 {
+		return nil, fmt.Errorf("db: algo bucket counts: bucket size must be > 0")
+	}
+
+	rows, err := d.Pool.Query(ctx, `
+		SELECT
+			(height / $1) * $1 AS bucket_start,
+			COUNT(*) FILTER (WHERE pow_algo = 'RXM')   AS rxm,
+			COUNT(*) FILTER (WHERE pow_algo = 'RXT')   AS rxt,
+			COUNT(*) FILTER (WHERE pow_algo = 'C29')   AS c29,
+			COUNT(*) FILTER (WHERE pow_algo = 'SHA3X') AS sha3x
+		FROM blocks
+		WHERE height BETWEEN $2 AND $3
+		GROUP BY bucket_start
+		ORDER BY bucket_start ASC
+	`, bucketSize, fromHeight, toHeight)
+	if err != nil {
+		return nil, fmt.Errorf("db: algo bucket counts: %w", err)
+	}
+	defer rows.Close()
+
+	var out []AlgoBucketRow
+	for rows.Next() {
+		var r AlgoBucketRow
+		if err := rows.Scan(&r.BucketStart, &r.RXM, &r.RXT, &r.C29, &r.SHA3X); err != nil {
+			return nil, fmt.Errorf("db: algo bucket counts: scan: %w", err)
+		}
+		r.BucketEnd = r.BucketStart + bucketSize - 1
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
