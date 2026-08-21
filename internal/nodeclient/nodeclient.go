@@ -41,18 +41,27 @@ type Client struct {
 	hosts   []string
 	conns   []*grpc.ClientConn // lazily dialed, index-aligned with hosts
 	current int                // index into hosts/conns to try first on the next call
+	opts    []grpc.DialOption  // extra dial options applied to every dial, appended after the default transport credentials
 }
 
 // New constructs a Client for the given list of "host:port" base-node GRPC targets.
 // Connections are dialed lazily (on first use per host), not eagerly in New, so
 // constructing a Client never blocks or fails even if a host is currently unreachable.
-func New(hosts []string) (*Client, error) {
+//
+// opts is an optional set of extra grpc.DialOption values appended to every dial,
+// after the default insecure transport credentials. Production callers don't need it
+// (zero opts gives the original dial behavior); it exists so tests can point a real
+// Client at an in-process bufconn-backed fake server via
+// grpc.WithContextDialer(...), exercising the actual withFailover/dial code path
+// instead of mocking it away.
+func New(hosts []string, opts ...grpc.DialOption) (*Client, error) {
 	if len(hosts) == 0 {
 		return nil, fmt.Errorf("nodeclient: at least one base-node GRPC host is required")
 	}
 	return &Client{
 		hosts: hosts,
 		conns: make([]*grpc.ClientConn, len(hosts)),
+		opts:  opts,
 	}, nil
 }
 
@@ -81,7 +90,8 @@ func (c *Client) connAt(i int) (*grpc.ClientConn, error) {
 	if c.conns[i] != nil {
 		return c.conns[i], nil
 	}
-	conn, err := grpc.NewClient(c.hosts[i], grpc.WithTransportCredentials(insecure.NewCredentials()))
+	dialOpts := append([]grpc.DialOption{grpc.WithTransportCredentials(insecure.NewCredentials())}, c.opts...)
+	conn, err := grpc.NewClient(c.hosts[i], dialOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -183,5 +193,91 @@ func (c *Client) GetNetworkDifficulty(ctx context.Context, height uint64) (*tari
 			return nil, err
 		}
 		return diffClient.Recv()
+	})
+}
+
+// SearchKernels finds every historical block containing a kernel matching one of the
+// given excess signatures, with failover across configured hosts. This is a live
+// chain query (not backed by this repo's Postgres index) - used as the fallback path
+// when a search query isn't found in the locally indexed `kernels` table, e.g. for a
+// transaction that hasn't been (re)indexed yet.
+func (c *Client) SearchKernels(ctx context.Context, signatures []*tari_generated.Signature) ([]*tari_generated.HistoricalBlock, error) {
+	return withFailover(c, ctx, func(ctx context.Context, client tari_generated.BaseNodeClient) ([]*tari_generated.HistoricalBlock, error) {
+		stream, err := client.SearchKernels(ctx, &tari_generated.SearchKernelsRequest{Signatures: signatures})
+		if err != nil {
+			return nil, err
+		}
+		return drainHistoricalBlocks(stream)
+	})
+}
+
+// SearchUtxos finds every historical block containing an output matching one of the
+// given commitments, with failover across configured hosts. Same live-chain-query
+// rationale as SearchKernels above.
+func (c *Client) SearchUtxos(ctx context.Context, commitments [][]byte) ([]*tari_generated.HistoricalBlock, error) {
+	return withFailover(c, ctx, func(ctx context.Context, client tari_generated.BaseNodeClient) ([]*tari_generated.HistoricalBlock, error) {
+		stream, err := client.SearchUtxos(ctx, &tari_generated.SearchUtxosRequest{Commitments: commitments})
+		if err != nil {
+			return nil, err
+		}
+		return drainHistoricalBlocks(stream)
+	})
+}
+
+// historicalBlockStream is the minimal interface both BaseNode_SearchKernelsClient and
+// BaseNode_SearchUtxosClient satisfy, letting drainHistoricalBlocks work for either
+// RPC's response stream without duplicating the drain loop.
+type historicalBlockStream interface {
+	Recv() (*tari_generated.HistoricalBlock, error)
+}
+
+// drainHistoricalBlocks reads every HistoricalBlock off a SearchKernels/SearchUtxos
+// response stream until io.EOF, matching GetBlockByHeight's existing drain pattern.
+func drainHistoricalBlocks(stream historicalBlockStream) ([]*tari_generated.HistoricalBlock, error) {
+	var out []*tari_generated.HistoricalBlock
+	for {
+		block, err := stream.Recv()
+		if err != nil {
+			if err == io.EOF {
+				return out, nil
+			}
+			return nil, err
+		}
+		out = append(out, block)
+	}
+}
+
+// SearchPaymentReferences finds every output matching one of the given 64-char-hex
+// payment references, with failover across configured hosts. This is Tari's own
+// dedicated payment-reference lookup RPC, distinct from the generic kernel/UTXO
+// search above - see tari_generated.PaymentReferenceResponse for the richer per-match
+// detail it returns (mined/spent height, timestamps, commitment).
+func (c *Client) SearchPaymentReferences(ctx context.Context, paymentReferenceHex []string) ([]*tari_generated.PaymentReferenceResponse, error) {
+	return withFailover(c, ctx, func(ctx context.Context, client tari_generated.BaseNodeClient) ([]*tari_generated.PaymentReferenceResponse, error) {
+		stream, err := client.SearchPaymentReferences(ctx, &tari_generated.SearchPaymentReferencesRequest{PaymentReferenceHex: paymentReferenceHex})
+		if err != nil {
+			return nil, err
+		}
+		var out []*tari_generated.PaymentReferenceResponse
+		for {
+			resp, err := stream.Recv()
+			if err != nil {
+				if err == io.EOF {
+					return out, nil
+				}
+				return nil, err
+			}
+			out = append(out, resp)
+		}
+	})
+}
+
+// TransactionState calls the base node's live TransactionState RPC for a single
+// excess signature, with failover across configured hosts. This is deliberately not
+// answered from this repo's Postgres index: mempool-vs-mined status can change between
+// polls, so "check right now" only means something against the live node.
+func (c *Client) TransactionState(ctx context.Context, excessSig *tari_generated.Signature) (*tari_generated.TransactionStateResponse, error) {
+	return withFailover(c, ctx, func(ctx context.Context, client tari_generated.BaseNodeClient) (*tari_generated.TransactionStateResponse, error) {
+		return client.TransactionState(ctx, &tari_generated.TransactionStateRequest{ExcessSig: excessSig})
 	})
 }

@@ -1,0 +1,18 @@
+{{define "content"}}
+<h2>Transaction State</h2>
+<form action="/tx-state" method="get" class="search-form">
+    <input type="text" name="excess_sig" value="{{.ExcessSig}}" placeholder="kernel excess signature (128-char hex: public_nonce+signature)" size="70">
+    <button type="submit">Check</button>
+</form>
+<p class="empty-note">This is always a live check against the base node - mempool/mined status is never read from the local index.</p>
+
+{{if .Checked}}
+    {{if .Unavailable}}
+    <p class="search-status search-unavailable">Live status check is not available: no base-node GRPC hosts are configured.</p>
+    {{else if .Error}}
+    <p class="search-status search-error">{{.Error}}</p>
+    {{else}}
+    <p class="search-status search-found">Status: <strong class="tx-state-{{.Result.State}}">{{.Result.State}}</strong></p>
+    {{end}}
+{{end}}
+{{end}}

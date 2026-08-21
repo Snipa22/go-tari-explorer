@@ -279,6 +279,266 @@ func (d *DB) MaxIndexedHeight(ctx context.Context) (uint64, error) {
 	return *max, nil
 }
 
+// Kernel is the row shape for the `kernels` table: one row per
+// github.com/Snipa22/go-tari-grpc-lib/v3/tari_generated.TransactionKernel found in a
+// block's body, keyed on (BlockHeight, Index). ExcessSigSignature is the canonical
+// per-transaction identifier used by internal/txsearch and the live TransactionState
+// RPC; ExcessSigNonce is carried alongside it because the two together make up the
+// real wire Signature message (public_nonce + signature), not because the nonce alone
+// is useful for lookups.
+type Kernel struct {
+	BlockHeight        uint64
+	Index              int32
+	Features           uint64
+	Fee                uint64
+	LockHeight         uint64
+	Excess             []byte
+	ExcessSigNonce     []byte
+	ExcessSigSignature []byte
+	Hash               []byte
+}
+
+// Output is the row shape for the `outputs` table: one row per
+// tari_generated.TransactionOutput found in a block's body, keyed on
+// (BlockHeight, Index). FeaturesVersion/OutputType/Maturity/CoinbaseExtra come from
+// the output's nested OutputFeatures message; Commitment is the output's own
+// homomorphic commitment, searchable via SearchUtxos.
+type Output struct {
+	BlockHeight     uint64
+	Index           int32
+	FeaturesVersion uint32
+	OutputType      uint32
+	Maturity        uint64
+	CoinbaseExtra   []byte
+	Commitment      []byte
+}
+
+// nonNilBytes coalesces a nil []byte to an empty (non-nil) one. Needed because
+// tari_generated's proto3 getters (e.g. TransactionKernel.GetExcess,
+// OutputFeatures.GetCoinbaseExtra) return a nil slice for an unset/empty bytes field -
+// completely normal for, say, a non-coinbase output's CoinbaseExtra - but pgx sends a
+// nil []byte as SQL NULL, which the kernels/outputs columns below reject (NOT NULL,
+// per migrations/0003_kernels_outputs.up.sql). Without this, indexing any block
+// containing a standard (non-coinbase) output would fail outright.
+func nonNilBytes(b []byte) []byte {
+	if b == nil {
+		return []byte{}
+	}
+	return b
+}
+
+// ReplaceKernelsForBlock atomically replaces every kernel row for blockHeight with
+// kernels, inside a single transaction. DELETE-then-INSERT (rather than a diffing
+// update) is the simplest correct approach here: kernels have no natural per-row
+// update-key within a block re-index (there's nothing to ON CONFLICT against short of
+// the same (block_height, kernel_index) pair this already keys on), and block bodies
+// are small enough - typically tens of kernels/outputs, not thousands - that a full
+// delete+reinsert per re-indexed block is not a meaningful perf concern. Safe to call
+// with an empty kernels slice (e.g. a block with no kernels), which simply clears any
+// previously stored rows for that height.
+func (d *DB) ReplaceKernelsForBlock(ctx context.Context, blockHeight uint64, kernels []Kernel) error {
+	tx, err := d.Pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("db: replace kernels for block %d: begin: %w", blockHeight, err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	if _, err := tx.Exec(ctx, `DELETE FROM kernels WHERE block_height = $1`, blockHeight); err != nil {
+		return fmt.Errorf("db: replace kernels for block %d: delete: %w", blockHeight, err)
+	}
+	for _, k := range kernels {
+		if _, err := tx.Exec(ctx, `
+			INSERT INTO kernels (
+				block_height, kernel_index, features, fee, lock_height,
+				excess, excess_sig_nonce, excess_sig_signature, hash
+			) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+		`, blockHeight, k.Index, k.Features, k.Fee, k.LockHeight,
+			nonNilBytes(k.Excess), nonNilBytes(k.ExcessSigNonce), nonNilBytes(k.ExcessSigSignature), nonNilBytes(k.Hash)); err != nil {
+			return fmt.Errorf("db: replace kernels for block %d: insert index %d: %w", blockHeight, k.Index, err)
+		}
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("db: replace kernels for block %d: commit: %w", blockHeight, err)
+	}
+	return nil
+}
+
+// ReplaceOutputsForBlock atomically replaces every output row for blockHeight with
+// outputs, inside a single transaction. Same DELETE-then-INSERT rationale as
+// ReplaceKernelsForBlock above.
+func (d *DB) ReplaceOutputsForBlock(ctx context.Context, blockHeight uint64, outputs []Output) error {
+	tx, err := d.Pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("db: replace outputs for block %d: begin: %w", blockHeight, err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	if _, err := tx.Exec(ctx, `DELETE FROM outputs WHERE block_height = $1`, blockHeight); err != nil {
+		return fmt.Errorf("db: replace outputs for block %d: delete: %w", blockHeight, err)
+	}
+	for _, o := range outputs {
+		if _, err := tx.Exec(ctx, `
+			INSERT INTO outputs (
+				block_height, output_index, features_version, output_type, maturity,
+				coinbase_extra, commitment
+			) VALUES ($1, $2, $3, $4, $5, $6, $7)
+		`, blockHeight, o.Index, o.FeaturesVersion, o.OutputType, o.Maturity,
+			nonNilBytes(o.CoinbaseExtra), nonNilBytes(o.Commitment)); err != nil {
+			return fmt.Errorf("db: replace outputs for block %d: insert index %d: %w", blockHeight, o.Index, err)
+		}
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("db: replace outputs for block %d: commit: %w", blockHeight, err)
+	}
+	return nil
+}
+
+// kernelColumns/scanKernelRow mirror blockColumns/scanBlockRow's pattern above, keeping
+// the column list and scan order for `kernels` in one place.
+const kernelColumns = `
+	block_height, kernel_index, features, fee, lock_height,
+	excess, excess_sig_nonce, excess_sig_signature, hash
+`
+
+func scanKernelRow(row pgx.Row, k *Kernel) error {
+	return row.Scan(
+		&k.BlockHeight, &k.Index, &k.Features, &k.Fee, &k.LockHeight,
+		&k.Excess, &k.ExcessSigNonce, &k.ExcessSigSignature, &k.Hash,
+	)
+}
+
+// GetKernelsForBlock returns every kernel row for blockHeight, ordered by kernel_index
+// ascending (the order they appeared in the block's body).
+func (d *DB) GetKernelsForBlock(ctx context.Context, blockHeight uint64) ([]Kernel, error) {
+	rows, err := d.Pool.Query(ctx, `
+		SELECT `+kernelColumns+`
+		FROM kernels
+		WHERE block_height = $1
+		ORDER BY kernel_index ASC
+	`, blockHeight)
+	if err != nil {
+		return nil, fmt.Errorf("db: get kernels for block %d: %w", blockHeight, err)
+	}
+	defer rows.Close()
+
+	var out []Kernel
+	for rows.Next() {
+		var k Kernel
+		if err := scanKernelRow(rows, &k); err != nil {
+			return nil, fmt.Errorf("db: get kernels for block %d: scan: %w", blockHeight, err)
+		}
+		out = append(out, k)
+	}
+	return out, rows.Err()
+}
+
+// outputColumns/scanOutputRow mirror kernelColumns/scanKernelRow above for `outputs`.
+const outputColumns = `
+	block_height, output_index, features_version, output_type, maturity,
+	coinbase_extra, commitment
+`
+
+func scanOutputRow(row pgx.Row, o *Output) error {
+	return row.Scan(
+		&o.BlockHeight, &o.Index, &o.FeaturesVersion, &o.OutputType, &o.Maturity,
+		&o.CoinbaseExtra, &o.Commitment,
+	)
+}
+
+// GetOutputsForBlock returns every output row for blockHeight, ordered by output_index
+// ascending (the order they appeared in the block's body).
+func (d *DB) GetOutputsForBlock(ctx context.Context, blockHeight uint64) ([]Output, error) {
+	rows, err := d.Pool.Query(ctx, `
+		SELECT `+outputColumns+`
+		FROM outputs
+		WHERE block_height = $1
+		ORDER BY output_index ASC
+	`, blockHeight)
+	if err != nil {
+		return nil, fmt.Errorf("db: get outputs for block %d: %w", blockHeight, err)
+	}
+	defer rows.Close()
+
+	var out []Output
+	for rows.Next() {
+		var o Output
+		if err := scanOutputRow(rows, &o); err != nil {
+			return nil, fmt.Errorf("db: get outputs for block %d: scan: %w", blockHeight, err)
+		}
+		out = append(out, o)
+	}
+	return out, rows.Err()
+}
+
+// FindKernelByExcessSigSignature looks up a kernel by its excess signature's scalar
+// component alone (excess_sig_signature), ignoring the nonce. This is the search key
+// internal/txsearch uses for a bare 32-byte ("64 hex char") query, since a caller
+// providing only the signature scalar (not the full nonce+signature pair) can still be
+// matched against what's already indexed. Returns pgx.ErrNoRows if nothing matches; if
+// more than one kernel happens to share a signature scalar (see the migration's note on
+// why this column isn't UNIQUE) the first by (block_height, kernel_index) is returned.
+func (d *DB) FindKernelByExcessSigSignature(ctx context.Context, sig []byte) (Kernel, error) {
+	var k Kernel
+	err := scanKernelRow(d.Pool.QueryRow(ctx, `
+		SELECT `+kernelColumns+`
+		FROM kernels
+		WHERE excess_sig_signature = $1
+		ORDER BY block_height ASC, kernel_index ASC
+		LIMIT 1
+	`, sig), &k)
+	if err != nil {
+		if err == pgx.ErrNoRows {
+			return Kernel{}, pgx.ErrNoRows
+		}
+		return Kernel{}, fmt.Errorf("db: find kernel by excess sig signature: %w", err)
+	}
+	return k, nil
+}
+
+// FindKernelByExcessSig looks up a kernel by its full excess signature (both the
+// public nonce and the signature scalar), for a 64-byte ("128 hex char") query that
+// unambiguously identifies one Signature message. Returns pgx.ErrNoRows if nothing
+// matches.
+func (d *DB) FindKernelByExcessSig(ctx context.Context, nonce, sig []byte) (Kernel, error) {
+	var k Kernel
+	err := scanKernelRow(d.Pool.QueryRow(ctx, `
+		SELECT `+kernelColumns+`
+		FROM kernels
+		WHERE excess_sig_nonce = $1 AND excess_sig_signature = $2
+		ORDER BY block_height ASC, kernel_index ASC
+		LIMIT 1
+	`, nonce, sig), &k)
+	if err != nil {
+		if err == pgx.ErrNoRows {
+			return Kernel{}, pgx.ErrNoRows
+		}
+		return Kernel{}, fmt.Errorf("db: find kernel by excess sig: %w", err)
+	}
+	return k, nil
+}
+
+// FindOutputByCommitment looks up an output by its commitment. Returns pgx.ErrNoRows
+// if nothing matches; if more than one output happens to share a commitment (see the
+// migration's note on why this column isn't UNIQUE) the first by
+// (block_height, output_index) is returned.
+func (d *DB) FindOutputByCommitment(ctx context.Context, commitment []byte) (Output, error) {
+	var o Output
+	err := scanOutputRow(d.Pool.QueryRow(ctx, `
+		SELECT `+outputColumns+`
+		FROM outputs
+		WHERE commitment = $1
+		ORDER BY block_height ASC, output_index ASC
+		LIMIT 1
+	`, commitment), &o)
+	if err != nil {
+		if err == pgx.ErrNoRows {
+			return Output{}, pgx.ErrNoRows
+		}
+		return Output{}, fmt.Errorf("db: find output by commitment: %w", err)
+	}
+	return o, nil
+}
+
 // AlgoBucketRow is one row of the height-bucketed pow-algo aggregation report: a
 // [BucketStart, BucketEnd] inclusive height range, plus the count of blocks in that
 // range attributed to each of the four known internal/poolattr.PowAlgo values.

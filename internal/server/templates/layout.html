@@ -21,11 +21,32 @@
         .stat-card { border: 1px solid #333; padding: 1rem; background: #17171b; }
         .stat-card .label { color: #999; font-size: 0.85rem; }
         .stat-card .value { font-size: 1.4rem; color: #7fffa0; }
+        .nav-search { display: inline-flex; margin-left: 0.5rem; }
+        .nav-search input { background: #1a1a1e; color: #e6e6e6; border: 1px solid #444; padding: 0.2rem 0.5rem; }
+        .nav-search button { padding: 0.2rem 0.6rem; }
+        .search-form { margin: 1rem 0; }
+        .search-form input { background: #1a1a1e; color: #e6e6e6; border: 1px solid #444; padding: 0.4rem 0.6rem; }
+        .search-status { padding: 0.6rem 0.8rem; margin-top: 0.5rem; border: 1px solid #333; }
+        .search-found { border-color: #2e5; }
+        .search-not-found { color: #999; }
+        .search-error, .search-unavailable { color: #ff8080; border-color: #833; }
+        .hex-cell { font-size: 0.85rem; }
+        .tx-state-link { font-size: 0.8rem; color: #999; }
+        .empty-note { color: #888; }
+        .tx-state-MEMPOOL { color: #ffd57f; }
+        .tx-state-MINED { color: #7fffa0; }
+        .tx-state-UNKNOWN, .tx-state-NOT_STORED { color: #888; }
     </style>
 </head>
 <body>
 <h1><a href="/">go-tari-explorer</a></h1>
-<nav><a href="/">Blocks</a> | <a href="/pool-stats">Pool Stats</a></nav>
+<nav>
+    <a href="/">Blocks</a> | <a href="/pool-stats">Pool Stats</a> | <a href="/search">Search</a>
+    <form action="/search" method="get" class="nav-search">
+        <input type="text" name="q" placeholder="search (excess sig / commitment / payment ref)" size="36">
+        <button type="submit">Go</button>
+    </form>
+</nav>
 {{block "content" .}}{{end}}
 </body>
 </html>

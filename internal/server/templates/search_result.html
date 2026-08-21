@@ -1,0 +1,40 @@
+{{define "content"}}
+<h2>Search</h2>
+<form action="/search" method="get" class="search-form">
+    <input type="text" name="q" value="{{.Query}}" placeholder="kernel excess signature, UTXO commitment, or payment reference (hex)" size="60">
+    <button type="submit">Search</button>
+</form>
+
+{{if .Searched}}
+    {{if .Unavailable}}
+    <p class="search-status search-unavailable">Search is not available: no base-node GRPC hosts are configured.</p>
+    {{else if .Error}}
+    <p class="search-status search-error">{{.Error}}</p>
+    {{else if .Result.Found}}
+    <div class="search-status search-found">
+        <p>Match found: <strong>{{.Result.Kind}}</strong> ({{.Result.Source}} lookup)</p>
+        <table>
+            <tr><th>Block Height</th><td><a href="/blocks/{{.Result.BlockHeight}}">{{.Result.BlockHeight}}</a></td></tr>
+            {{if .Result.BlockHash}}<tr><th>Block Hash</th><td>{{.Result.BlockHash}}</td></tr>{{end}}
+            {{if .Result.Kernel}}
+            <tr><th>Kernel Index</th><td>{{.Result.Kernel.Index}}</td></tr>
+            <tr><th>Fee (MicroMinotari)</th><td>{{.Result.Kernel.Fee}}</td></tr>
+            {{end}}
+            {{if .Result.Output}}
+            <tr><th>Output Index</th><td>{{.Result.Output.Index}}</td></tr>
+            <tr><th>Output Type</th><td>{{.Result.Output.OutputType}}</td></tr>
+            {{end}}
+            {{if .Result.PaymentReference}}
+            <tr><th>Mined Timestamp</th><td>{{.Result.PaymentReference.GetMinedTimestamp}}</td></tr>
+            <tr><th>Is Spent</th><td>{{.Result.PaymentReference.GetIsSpent}}</td></tr>
+            {{end}}
+        </table>
+        {{if .Result.Kernel}}
+        <p><a href="/tx-state?excess_sig={{printf "%x%x" .Result.Kernel.ExcessSigNonce .Result.Kernel.ExcessSigSignature}}">Check live transaction status &rarr;</a></p>
+        {{end}}
+    </div>
+    {{else}}
+    <p class="search-status search-not-found">No kernel, output, or payment reference found for "{{.Query}}".</p>
+    {{end}}
+{{end}}
+{{end}}
