@@ -1,0 +1,235 @@
+// Historical-analysis HTTP routes: a landing page plus four analysis views
+// (algo-distribution, pool-share, block-time, difficulty), each an HTML page embedding
+// a server-rendered PNG chart (via internal/chartrender, fed by internal/analysis) as
+// an <img> tag - no client-side JS charting. Each HTML page and its companion .png
+// endpoint share the same bucket_size/from/to query-param parsing so the <img src>
+// resubmits exactly the params the page itself was loaded with.
+package server
+
+import (
+	"html/template"
+	"log"
+	"net/http"
+	"strconv"
+
+	"github.com/Snipa22/go-tari-explorer/internal/analysis"
+	"github.com/Snipa22/go-tari-explorer/internal/chartrender"
+	"github.com/Snipa22/go-tari-explorer/internal/db"
+)
+
+// analysisParams is the parsed/defaulted bucket_size/from/to query-param triple shared
+// by every analysis HTML page and PNG endpoint.
+type analysisParams struct {
+	BucketSize uint64
+	From       uint64
+	To         uint64
+}
+
+// String renders the params back into a query string, used by the HTML templates to
+// build each page's <img src="...png?..."> and form-resubmit action consistently.
+func (p analysisParams) String() string {
+	return "bucket_size=" + strconv.FormatUint(p.BucketSize, 10) +
+		"&from=" + strconv.FormatUint(p.From, 10) +
+		"&to=" + strconv.FormatUint(p.To, 10)
+}
+
+// defaultAnalysisToHeight is used as the "to" bound when the caller doesn't specify one
+// and the DB has no indexed blocks yet (MaxIndexedHeight returns 0) - large enough that
+// a real range query still returns real results, matching cmd/algobuckets' own
+// zero-args behavior.
+const defaultAnalysisToHeight = 1_000_000
+
+// parseAnalysisParams reads bucket_size/from/to from the request's query string,
+// defaulting bucket_size to analysis.DefaultBucketSize, from to 0, and to to the
+// highest currently-indexed block height (or defaultAnalysisToHeight if the table is
+// empty). Malformed numeric params are silently treated as absent (fall back to the
+// default) rather than producing a 400 - this is a read-only reporting page, not a
+// form that mutates state, so a bad param degrading gracefully is preferable to erroring.
+func (s *Server) parseAnalysisParams(r *http.Request) analysisParams {
+	q := r.URL.Query()
+	p := analysisParams{BucketSize: analysis.DefaultBucketSize}
+	if v, err := strconv.ParseUint(q.Get("bucket_size"), 10, 64); err == nil && v > 0 {
+		p.BucketSize = v
+	}
+	if v, err := strconv.ParseUint(q.Get("from"), 10, 64); err == nil {
+		p.From = v
+	}
+	if v, err := strconv.ParseUint(q.Get("to"), 10, 64); err == nil && v > 0 {
+		p.To = v
+	} else {
+		max, err := s.DB.MaxIndexedHeight(r.Context())
+		if err != nil || max == 0 {
+			p.To = defaultAnalysisToHeight
+		} else {
+			p.To = max
+		}
+	}
+	return p
+}
+
+// handleAnalysisIndex serves the /analysis landing page: links to the 4 views.
+func (s *Server) handleAnalysisIndex(w http.ResponseWriter, r *http.Request) {
+	if err := s.analysisIndexTmpl.Execute(w, nil); err != nil {
+		log.Printf("server: render analysis index: %v", err)
+	}
+}
+
+// imgSrc builds the `<img src>` value for a given analysis .png endpoint and the
+// current request's params, as a template.URL so html/template's contextual
+// autoescaper treats the query-string separators (&, =) literally instead of
+// percent-encoding them (which would otherwise produce a src the server-side query
+// parser can't split back into individual params).
+func imgSrc(pngPath string, p analysisParams) template.URL {
+	return template.URL(pngPath + "?" + p.String())
+}
+
+// analysisViewData is the template data shape shared by all 4 analysis HTML view pages.
+type analysisViewData struct {
+	Title      string
+	ImgSrc     template.URL
+	Params     analysisParams
+	Error      string
+	Summary    *blockTimeSummaryView
+	Difficulty bool
+}
+
+// blockTimeSummaryView adapts db.BlockTimeSummaryRow for template rendering, pre-
+// formatting its nullable pointer fields into display strings ("n/a" when nil) so the
+// template itself never needs to dereference a pointer.
+type blockTimeSummaryView struct {
+	Mean        string
+	Median      string
+	StdDev      string
+	Max         string
+	SampleCount int64
+}
+
+func formatSecondsPtr(v *float64) string {
+	if v == nil {
+		return "n/a"
+	}
+	return strconv.FormatFloat(*v, 'f', 2, 64)
+}
+
+func newBlockTimeSummaryView(r db.BlockTimeSummaryRow) blockTimeSummaryView {
+	maxStr := "n/a"
+	if r.Max != nil {
+		maxStr = strconv.FormatInt(*r.Max, 10)
+	}
+	return blockTimeSummaryView{
+		Mean:        formatSecondsPtr(r.Mean),
+		Median:      formatSecondsPtr(r.Median),
+		StdDev:      formatSecondsPtr(r.StdDev),
+		Max:         maxStr,
+		SampleCount: r.SampleCount,
+	}
+}
+
+func (s *Server) handleAnalysisAlgoDistribution(w http.ResponseWriter, r *http.Request) {
+	p := s.parseAnalysisParams(r)
+	data := analysisViewData{Title: "Algo Distribution", ImgSrc: imgSrc("/analysis/algo-distribution.png", p), Params: p}
+	if _, _, err := analysis.AlgoDistribution(r.Context(), s.DB, p.BucketSize, p.From, p.To); err != nil {
+		log.Printf("server: analysis algo distribution: %v", err)
+		data.Error = "unable to load chart data"
+	}
+	if err := s.analysisViewTmpl.Execute(w, data); err != nil {
+		log.Printf("server: render analysis algo distribution: %v", err)
+	}
+}
+
+func (s *Server) handleAnalysisPoolShare(w http.ResponseWriter, r *http.Request) {
+	p := s.parseAnalysisParams(r)
+	data := analysisViewData{Title: "Pool Share", ImgSrc: imgSrc("/analysis/pool-share.png", p), Params: p}
+	if _, _, err := analysis.PoolShare(r.Context(), s.DB, p.BucketSize, p.From, p.To, analysis.DefaultTopPools); err != nil {
+		log.Printf("server: analysis pool share: %v", err)
+		data.Error = "unable to load chart data"
+	}
+	if err := s.analysisViewTmpl.Execute(w, data); err != nil {
+		log.Printf("server: render analysis pool share: %v", err)
+	}
+}
+
+func (s *Server) handleAnalysisBlockTime(w http.ResponseWriter, r *http.Request) {
+	p := s.parseAnalysisParams(r)
+	data := analysisViewData{Title: "Block Time", ImgSrc: imgSrc("/analysis/block-time.png", p), Params: p}
+	_, summary, err := analysis.BlockTime(r.Context(), s.DB, p.BucketSize, p.From, p.To)
+	if err != nil {
+		log.Printf("server: analysis block time: %v", err)
+		data.Error = "unable to load chart data"
+	} else {
+		v := newBlockTimeSummaryView(summary)
+		data.Summary = &v
+	}
+	if err := s.analysisViewTmpl.Execute(w, data); err != nil {
+		log.Printf("server: render analysis block time: %v", err)
+	}
+}
+
+func (s *Server) handleAnalysisDifficulty(w http.ResponseWriter, r *http.Request) {
+	p := s.parseAnalysisParams(r)
+	data := analysisViewData{Title: "Difficulty", ImgSrc: imgSrc("/analysis/difficulty.png", p), Params: p, Difficulty: true}
+	if _, _, err := analysis.Difficulty(r.Context(), s.DB, p.BucketSize, p.From, p.To); err != nil {
+		log.Printf("server: analysis difficulty: %v", err)
+		data.Error = "unable to load chart data"
+	}
+	if err := s.analysisViewTmpl.Execute(w, data); err != nil {
+		log.Printf("server: render analysis difficulty: %v", err)
+	}
+}
+
+// writePNG writes chart PNG bytes with the correct Content-Type, or a 500 on error.
+func writePNG(w http.ResponseWriter, png []byte, err error, logCtx string) {
+	if err != nil {
+		log.Printf("server: %s: %v", logCtx, err)
+		http.Error(w, "failed to render chart", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "image/png")
+	if _, err := w.Write(png); err != nil {
+		log.Printf("server: %s: write response: %v", logCtx, err)
+	}
+}
+
+func (s *Server) handleAnalysisAlgoDistributionPNG(w http.ResponseWriter, r *http.Request) {
+	p := s.parseAnalysisParams(r)
+	points, order, err := analysis.AlgoDistribution(r.Context(), s.DB, p.BucketSize, p.From, p.To)
+	if err != nil {
+		writePNG(w, nil, err, "analysis algo distribution png")
+		return
+	}
+	png, err := chartrender.StackedAreaChart(points, order, "Algo Distribution", "block height", "block count")
+	writePNG(w, png, err, "analysis algo distribution png")
+}
+
+func (s *Server) handleAnalysisPoolSharePNG(w http.ResponseWriter, r *http.Request) {
+	p := s.parseAnalysisParams(r)
+	points, order, err := analysis.PoolShare(r.Context(), s.DB, p.BucketSize, p.From, p.To, analysis.DefaultTopPools)
+	if err != nil {
+		writePNG(w, nil, err, "analysis pool share png")
+		return
+	}
+	png, err := chartrender.StackedAreaChart(points, order, "Pool Share", "block height", "block count")
+	writePNG(w, png, err, "analysis pool share png")
+}
+
+func (s *Server) handleAnalysisBlockTimePNG(w http.ResponseWriter, r *http.Request) {
+	p := s.parseAnalysisParams(r)
+	points, _, err := analysis.BlockTime(r.Context(), s.DB, p.BucketSize, p.From, p.To)
+	if err != nil {
+		writePNG(w, nil, err, "analysis block time png")
+		return
+	}
+	png, err := chartrender.LineChart(points, []string{"block time (s)"}, "Block Time (median, seconds)", "block height", "seconds")
+	writePNG(w, png, err, "analysis block time png")
+}
+
+func (s *Server) handleAnalysisDifficultyPNG(w http.ResponseWriter, r *http.Request) {
+	p := s.parseAnalysisParams(r)
+	points, seriesName, err := analysis.Difficulty(r.Context(), s.DB, p.BucketSize, p.From, p.To)
+	if err != nil {
+		writePNG(w, nil, err, "analysis difficulty png")
+		return
+	}
+	png, err := chartrender.LineChart(points, []string{seriesName}, "Difficulty (avg, hashrate proxy)", "block height", "difficulty")
+	writePNG(w, png, err, "analysis difficulty png")
+}

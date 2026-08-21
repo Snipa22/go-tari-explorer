@@ -1,0 +1,260 @@
+package analysis
+
+import (
+	"context"
+	"os"
+	"testing"
+
+	"github.com/Snipa22/go-tari-explorer/internal/db"
+)
+
+// testDSN resolves the Postgres connection string used by these tests: an explicit
+// TARI_EXPLORER_TEST_DSN environment variable if set, otherwise the local embedded
+// Postgres instance used for this repo's own agent-driven development/testing
+// (postgres 17, socket-less TCP on 5433, trust auth, tari_explorer_test database).
+func testDSN() string {
+	if dsn := os.Getenv("TARI_EXPLORER_TEST_DSN"); dsn != "" {
+		return dsn
+	}
+	return "postgres://postgres@/tari_explorer_test?host=/workspace/pg-embed/sockets&port=5433&sslmode=disable"
+}
+
+// setupTestDB connects to testDSN, runs migrations, and truncates `blocks` so each test
+// starts from a clean slate (tests in this package run sequentially and share the same
+// database, matching how a real single-writer indexer would populate it). Skips the
+// test (not fails) if the database is unreachable, so this suite doesn't break CI
+// environments without a live Postgres.
+func setupTestDB(t *testing.T) *db.DB {
+	t.Helper()
+	ctx := context.Background()
+	database, err := db.Connect(ctx, testDSN())
+	if err != nil {
+		t.Skipf("analysis: skipping DB-backed test, cannot connect to %s: %v", testDSN(), err)
+	}
+	if err := database.Migrate(ctx); err != nil {
+		database.Close()
+		t.Fatalf("analysis: migrate: %v", err)
+	}
+	if _, err := database.Pool.Exec(ctx, `TRUNCATE TABLE blocks CASCADE`); err != nil {
+		database.Close()
+		t.Fatalf("analysis: truncate blocks: %v", err)
+	}
+	t.Cleanup(database.Close)
+	return database
+}
+
+// seedBlock inserts one fixture block row with the fields the analysis queries care
+// about (height, timestamp, pow_algo, difficulty, pool_tag); every other Block field is
+// left at its zero value since none of the analysis queries touch them.
+func seedBlock(t *testing.T, database *db.DB, height uint64, timestamp int64, powAlgo string, difficulty int64, poolTag *string) {
+	t.Helper()
+	b := db.Block{
+		Height:            height,
+		Hash:              "hash",
+		PrevHash:          "prev",
+		Timestamp:         timestamp,
+		OutputMr:          []byte{},
+		BlockOutputMr:     []byte{},
+		KernelMr:          []byte{},
+		InputMr:           []byte{},
+		TotalKernelOffset: []byte{},
+		TotalScriptOffset: []byte{},
+		ValidatorNodeMr:   []byte{},
+		PowData:           []byte{},
+		PowAlgo:           powAlgo,
+		Difficulty:        difficulty,
+		PoolTag:           poolTag,
+	}
+	if err := database.UpsertBlock(context.Background(), b); err != nil {
+		t.Fatalf("analysis: seed block %d: %v", height, err)
+	}
+}
+
+func strPtr(s string) *string { return &s }
+
+func TestAlgoDistribution(t *testing.T) {
+	database := setupTestDB(t)
+	ctx := context.Background()
+
+	// Bucket [0,999]: 2 RXM, 1 RXT, 1 C29, 0 SHA3X.
+	seedBlock(t, database, 0, 1000, "RXM", 100, nil)
+	seedBlock(t, database, 1, 1010, "RXM", 100, nil)
+	seedBlock(t, database, 2, 1020, "RXT", 100, nil)
+	seedBlock(t, database, 3, 1030, "C29", 100, nil)
+	// Bucket [1000,1999]: 1 SHA3X.
+	seedBlock(t, database, 1000, 1040, "SHA3X", 100, nil)
+
+	points, order, err := AlgoDistribution(ctx, database, 1000, 0, 1999)
+	if err != nil {
+		t.Fatalf("AlgoDistribution: %v", err)
+	}
+	if got, want := order, AlgoOrder; len(got) != len(want) {
+		t.Fatalf("series order = %v, want %v", got, want)
+	}
+	if len(points) != 2 {
+		t.Fatalf("len(points) = %d, want 2", len(points))
+	}
+	// points aren't guaranteed sorted by AlgoDistribution itself (chartrender sorts at
+	// render time), so index by X.
+	byX := map[float64]map[string]float64{}
+	for _, p := range points {
+		byX[p.X] = p.Series
+	}
+	b0, ok := byX[0]
+	if !ok {
+		t.Fatalf("missing bucket 0 in points: %+v", points)
+	}
+	if b0["RXM"] != 2 || b0["RXT"] != 1 || b0["C29"] != 1 || b0["SHA3X"] != 0 {
+		t.Errorf("bucket 0 = %+v, want RXM=2 RXT=1 C29=1 SHA3X=0", b0)
+	}
+	b1, ok := byX[1000]
+	if !ok {
+		t.Fatalf("missing bucket 1000 in points: %+v", points)
+	}
+	if b1["SHA3X"] != 1 {
+		t.Errorf("bucket 1000 SHA3X = %v, want 1", b1["SHA3X"])
+	}
+}
+
+func TestPoolShare(t *testing.T) {
+	database := setupTestDB(t)
+	ctx := context.Background()
+
+	poolA, poolB, poolC := strPtr("poolA"), strPtr("poolB"), strPtr("poolC")
+	// Bucket [0,999]: poolA x3, poolB x2, poolC x1, unknown(nil) x1.
+	seedBlock(t, database, 0, 1000, "RXM", 100, poolA)
+	seedBlock(t, database, 1, 1010, "RXM", 100, poolA)
+	seedBlock(t, database, 2, 1020, "RXM", 100, poolA)
+	seedBlock(t, database, 3, 1030, "RXM", 100, poolB)
+	seedBlock(t, database, 4, 1040, "RXM", 100, poolB)
+	seedBlock(t, database, 5, 1050, "RXM", 100, poolC)
+	seedBlock(t, database, 6, 1060, "RXM", 100, nil)
+
+	// topN=2: poolA + poolB are kept as their own series, poolC folds into "other",
+	// nil folds into "unknown".
+	points, order, err := PoolShare(ctx, database, 1000, 0, 999, 2)
+	if err != nil {
+		t.Fatalf("PoolShare: %v", err)
+	}
+	if len(points) != 1 {
+		t.Fatalf("len(points) = %d, want 1", len(points))
+	}
+	series := points[0].Series
+	if series["poolA"] != 3 {
+		t.Errorf("poolA = %v, want 3", series["poolA"])
+	}
+	if series["poolB"] != 2 {
+		t.Errorf("poolB = %v, want 2", series["poolB"])
+	}
+	if series["other"] != 1 {
+		t.Errorf("other = %v, want 1", series["other"])
+	}
+	if series["unknown"] != 1 {
+		t.Errorf("unknown = %v, want 1", series["unknown"])
+	}
+	// order: real pools by descending total (poolA, poolB), then unknown, then other.
+	wantOrder := []string{"poolA", "poolB", "unknown", "other"}
+	if len(order) != len(wantOrder) {
+		t.Fatalf("order = %v, want %v", order, wantOrder)
+	}
+	for i, name := range wantOrder {
+		if order[i] != name {
+			t.Errorf("order[%d] = %q, want %q (full order %v)", i, order[i], name, order)
+		}
+	}
+}
+
+func TestBlockTime(t *testing.T) {
+	database := setupTestDB(t)
+	ctx := context.Background()
+
+	// Heights 0..3 with deltas 10, 20, 30 seconds (median 20), all in bucket [0,999].
+	seedBlock(t, database, 0, 1000, "RXM", 100, nil)
+	seedBlock(t, database, 1, 1010, "RXM", 100, nil) // delta 10
+	seedBlock(t, database, 2, 1030, "RXM", 100, nil) // delta 20
+	seedBlock(t, database, 3, 1060, "RXM", 100, nil) // delta 30
+
+	points, summary, err := BlockTime(ctx, database, 1000, 0, 3)
+	if err != nil {
+		t.Fatalf("BlockTime: %v", err)
+	}
+	if len(points) != 1 {
+		t.Fatalf("len(points) = %d, want 1", len(points))
+	}
+	if got := points[0].Series[blockTimeSeriesName]; got != 20 {
+		t.Errorf("median block time = %v, want 20", got)
+	}
+	if summary.SampleCount != 3 {
+		t.Errorf("summary.SampleCount = %d, want 3", summary.SampleCount)
+	}
+	if summary.Mean == nil || *summary.Mean != 20 {
+		t.Errorf("summary.Mean = %v, want 20", summary.Mean)
+	}
+	if summary.Median == nil || *summary.Median != 20 {
+		t.Errorf("summary.Median = %v, want 20", summary.Median)
+	}
+	if summary.Max == nil || *summary.Max != 30 {
+		t.Errorf("summary.Max = %v, want 30", summary.Max)
+	}
+	if summary.StdDev == nil {
+		t.Errorf("summary.StdDev = nil, want a value")
+	}
+}
+
+func TestBlockTime_NoSamples(t *testing.T) {
+	database := setupTestDB(t)
+	ctx := context.Background()
+
+	// Single block with no predecessor row -> zero usable samples.
+	seedBlock(t, database, 500, 1000, "RXM", 100, nil)
+
+	points, summary, err := BlockTime(ctx, database, 1000, 0, 999)
+	if err != nil {
+		t.Fatalf("BlockTime: %v", err)
+	}
+	if len(points) != 1 {
+		t.Fatalf("len(points) = %d, want 1", len(points))
+	}
+	if got := points[0].Series[blockTimeSeriesName]; got != 0 {
+		t.Errorf("median block time with no samples = %v, want 0", got)
+	}
+	if summary.SampleCount != 0 {
+		t.Errorf("summary.SampleCount = %d, want 0", summary.SampleCount)
+	}
+	if summary.Mean != nil {
+		t.Errorf("summary.Mean = %v, want nil", *summary.Mean)
+	}
+}
+
+func TestDifficulty(t *testing.T) {
+	database := setupTestDB(t)
+	ctx := context.Background()
+
+	// Bucket [0,999]: difficulties 100, 200, 300 -> avg 200.
+	seedBlock(t, database, 0, 1000, "RXM", 100, nil)
+	seedBlock(t, database, 1, 1010, "RXM", 200, nil)
+	seedBlock(t, database, 2, 1020, "RXM", 300, nil)
+	// Bucket [1000,1999]: difficulty 1000.
+	seedBlock(t, database, 1000, 1030, "RXM", 1000, nil)
+
+	points, seriesName, err := Difficulty(ctx, database, 1000, 0, 1999)
+	if err != nil {
+		t.Fatalf("Difficulty: %v", err)
+	}
+	if seriesName != difficultySeriesName {
+		t.Errorf("seriesName = %q, want %q", seriesName, difficultySeriesName)
+	}
+	if len(points) != 2 {
+		t.Fatalf("len(points) = %d, want 2", len(points))
+	}
+	byX := map[float64]float64{}
+	for _, p := range points {
+		byX[p.X] = p.Series[seriesName]
+	}
+	if byX[0] != 200 {
+		t.Errorf("bucket 0 avg difficulty = %v, want 200", byX[0])
+	}
+	if byX[1000] != 1000 {
+		t.Errorf("bucket 1000 avg difficulty = %v, want 1000", byX[1000])
+	}
+}

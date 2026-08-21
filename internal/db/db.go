@@ -331,3 +331,239 @@ func (d *DB) AlgoBucketCounts(ctx context.Context, bucketSize uint64, fromHeight
 	}
 	return out, rows.Err()
 }
+
+// PoolShareBucketRow is one (bucket, pool) row of the height-bucketed pool market-share
+// report: how many blocks in [BucketStart, BucketEnd] were attributed to PoolTag.
+// PoolTag is either a real pool_tag value, the literal string "unknown" (blocks with a
+// NULL pool_tag - unattributed), or the literal string "other" (blocks attributed to a
+// real pool tag that didn't make the top-N cut for the queried range, see
+// PoolShareBucketCounts' topN parameter). This is a "long" row shape (one row per
+// bucket+pool combination) rather than AlgoBucketRow's fixed-column shape, because the
+// set of pool tags is open-ended/data-dependent while the four pow-algo values are not.
+type PoolShareBucketRow struct {
+	BucketStart uint64
+	BucketEnd   uint64
+	PoolTag     string
+	Count       int64
+}
+
+// PoolShareBucketCounts groups blocks in [fromHeight, toHeight] (inclusive) into the
+// same height buckets as AlgoBucketCounts, and within each bucket counts how many
+// blocks were mined by each pool_tag. To keep the result (and any legend built from it)
+// bounded, only the topN pool tags by total block count over the whole queried range
+// are kept as their own series; every other non-null pool_tag is folded into a single
+// "other" series, and NULL pool_tag (unattributed blocks) is always its own "unknown"
+// series regardless of topN. topN is a caller-supplied cap (the analysis HTTP handlers
+// default to 8, chosen as a reasonable legend size for a chart embedded at normal page
+// width - see internal/server/analysis.go) rather than hardcoded here, so callers can
+// tune it.
+//
+// As with AlgoBucketCounts, all aggregation (bucketing, top-N ranking, grouping) happens
+// Postgres-side via a CTE + GROUP BY - raw block rows are never pulled into Go to
+// aggregate here. Results are ordered by bucket_start, then pool_tag, ascending.
+// bucketSize must be > 0 and topN must be >= 0 (0 means every non-null pool_tag folds
+// into "other").
+func (d *DB) PoolShareBucketCounts(ctx context.Context, bucketSize uint64, fromHeight, toHeight uint64, topN int) ([]PoolShareBucketRow, error) {
+	if bucketSize == 0 {
+		return nil, fmt.Errorf("db: pool share bucket counts: bucket size must be > 0")
+	}
+	if topN < 0 {
+		return nil, fmt.Errorf("db: pool share bucket counts: topN must be >= 0")
+	}
+
+	rows, err := d.Pool.Query(ctx, `
+		WITH top_pools AS (
+			SELECT pool_tag
+			FROM blocks
+			WHERE height BETWEEN $2 AND $3 AND pool_tag IS NOT NULL
+			GROUP BY pool_tag
+			ORDER BY COUNT(*) DESC
+			LIMIT $4
+		),
+		classified AS (
+			SELECT
+				(height / $1) * $1 AS bucket_start,
+				CASE
+					WHEN pool_tag IS NULL THEN 'unknown'
+					WHEN pool_tag IN (SELECT pool_tag FROM top_pools) THEN pool_tag
+					ELSE 'other'
+				END AS pool_key
+			FROM blocks
+			WHERE height BETWEEN $2 AND $3
+		)
+		SELECT bucket_start, pool_key, COUNT(*) AS block_count
+		FROM classified
+		GROUP BY bucket_start, pool_key
+		ORDER BY bucket_start ASC, pool_key ASC
+	`, bucketSize, fromHeight, toHeight, topN)
+	if err != nil {
+		return nil, fmt.Errorf("db: pool share bucket counts: %w", err)
+	}
+	defer rows.Close()
+
+	var out []PoolShareBucketRow
+	for rows.Next() {
+		var r PoolShareBucketRow
+		if err := rows.Scan(&r.BucketStart, &r.PoolTag, &r.Count); err != nil {
+			return nil, fmt.Errorf("db: pool share bucket counts: scan: %w", err)
+		}
+		r.BucketEnd = r.BucketStart + bucketSize - 1
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
+// BlockTimeBucketRow is one row of the height-bucketed block-time report: the median
+// inter-block time (seconds) for blocks in [BucketStart, BucketEnd] that have a usable
+// predecessor, plus how many blocks in that bucket actually contributed a sample.
+// MedianSeconds is nil if the bucket had zero usable samples (e.g. every block in it hit
+// a predecessor gap - see BlockTimeDeltaBuckets).
+type BlockTimeBucketRow struct {
+	BucketStart   uint64
+	BucketEnd     uint64
+	MedianSeconds *float64
+	SampleCount   int64
+}
+
+// blockTimeDeltasCTE computes, for each block in [fromHeight, toHeight], its time delta
+// (seconds) from its immediate height-1 predecessor via a self-LEFT JOIN. delta_seconds
+// is NULL whenever that predecessor row doesn't exist (an indexing gap) so it's simply
+// excluded by every aggregate below (Postgres aggregates ignore NULL input) rather than
+// poisoning the average/median/etc. or crashing. This is shared textually (not as a Go
+// helper - Postgres doesn't let us parameterize a CTE across two separate queries) by
+// both BlockTimeDeltaBuckets and BlockTimeSummary; keep them in sync if this changes.
+// Takes fromHeight/toHeight as $1/$2; callers needing an additional bucketSize
+// parameter (BlockTimeDeltaBuckets) bind it as $3 in their own SELECT.
+const blockTimeDeltasCTE = `
+	WITH deltas AS (
+		SELECT
+			b.height,
+			b.timestamp - p.timestamp AS delta_seconds
+		FROM blocks b
+		LEFT JOIN blocks p ON p.height = b.height - 1
+		WHERE b.height BETWEEN $1 AND $2
+	)
+`
+
+// BlockTimeDeltaBuckets groups blocks in [fromHeight, toHeight] (inclusive) into the same
+// height buckets as AlgoBucketCounts, and within each bucket computes the MEDIAN
+// inter-block time (via Postgres' PERCENTILE_CONT(0.5), computed server-side) rather than
+// the mean. Block times have a long right tail (network blips, indexer catch-up gaps,
+// occasional multi-minute stretches) that would otherwise skew a mean upward and make the
+// chart look noisier than the typical block cadence actually is - median is more robust to
+// those outliers and is what this chart plots. (See BlockTimeSummary for the full
+// mean/median/stddev/max breakdown used by the stat-card panel, which surfaces the mean
+// too so the skew itself is visible to the reader.) bucketSize must be > 0.
+func (d *DB) BlockTimeDeltaBuckets(ctx context.Context, bucketSize uint64, fromHeight, toHeight uint64) ([]BlockTimeBucketRow, error) {
+	if bucketSize == 0 {
+		return nil, fmt.Errorf("db: block time delta buckets: bucket size must be > 0")
+	}
+
+	rows, err := d.Pool.Query(ctx, blockTimeDeltasCTE+`
+		SELECT
+			(height / $3) * $3 AS bucket_start,
+			PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY delta_seconds) AS median_seconds,
+			COUNT(delta_seconds) AS sample_count
+		FROM deltas
+		GROUP BY bucket_start
+		ORDER BY bucket_start ASC
+	`, fromHeight, toHeight, bucketSize)
+	if err != nil {
+		return nil, fmt.Errorf("db: block time delta buckets: %w", err)
+	}
+	defer rows.Close()
+
+	var out []BlockTimeBucketRow
+	for rows.Next() {
+		var r BlockTimeBucketRow
+		if err := rows.Scan(&r.BucketStart, &r.MedianSeconds, &r.SampleCount); err != nil {
+			return nil, fmt.Errorf("db: block time delta buckets: scan: %w", err)
+		}
+		r.BucketEnd = r.BucketStart + bucketSize - 1
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
+// BlockTimeSummaryRow holds mean/median/stddev/max inter-block-time (seconds) over a
+// queried height range, plus how many blocks actually contributed a sample (blocks
+// whose predecessor row was missing - an indexing gap - are excluded, see
+// blockTimeDeltasCTE). All of Mean/Median/StdDev/Max are nil when SampleCount is 0.
+type BlockTimeSummaryRow struct {
+	Mean        *float64
+	Median      *float64
+	StdDev      *float64
+	Max         *int64
+	SampleCount int64
+}
+
+// BlockTimeSummary computes summary statistics (mean, median, sample standard deviation,
+// max) of inter-block time over blocks in [fromHeight, toHeight] (inclusive), for the
+// plain-HTML stat-card panel next to the block-time chart. Like BlockTimeDeltaBuckets,
+// this reuses blockTimeDeltasCTE so a block with a missing predecessor is excluded from
+// every statistic rather than causing a NULL-propagation crash.
+func (d *DB) BlockTimeSummary(ctx context.Context, fromHeight, toHeight uint64) (BlockTimeSummaryRow, error) {
+	var r BlockTimeSummaryRow
+	err := d.Pool.QueryRow(ctx, blockTimeDeltasCTE+`
+		SELECT
+			AVG(delta_seconds),
+			PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY delta_seconds),
+			STDDEV_SAMP(delta_seconds),
+			MAX(delta_seconds),
+			COUNT(delta_seconds)
+		FROM deltas
+	`, fromHeight, toHeight).Scan(&r.Mean, &r.Median, &r.StdDev, &r.Max, &r.SampleCount)
+	if err != nil {
+		return BlockTimeSummaryRow{}, fmt.Errorf("db: block time summary: %w", err)
+	}
+	return r, nil
+}
+
+// DifficultyBucketRow is one row of the height-bucketed average-difficulty report:
+// AvgDifficulty is the mean `difficulty` column value over blocks in
+// [BucketStart, BucketEnd]. Difficulty is used directly as a hashrate proxy (difficulty
+// is proportional to expected hashes-per-block; hashrate = difficulty / block_time, but
+// this repo's blocks table - and the upstream go-tari-grpc-lib v3.2.0 BlockHeader proto
+// it's decomposed from - carries no per-network target-block-time field, so a literal
+// hashrate figure isn't derivable from indexed data alone). A difficulty-over-height
+// chart is the intended stand-in; see internal/server/analysis.go's difficulty handler.
+type DifficultyBucketRow struct {
+	BucketStart   uint64
+	BucketEnd     uint64
+	AvgDifficulty float64
+}
+
+// DifficultyBucketAvg groups blocks in [fromHeight, toHeight] (inclusive) into the same
+// height buckets as AlgoBucketCounts and averages `difficulty` per bucket, aggregated
+// entirely in Postgres via GROUP BY (never pulling raw rows into Go). bucketSize must be
+// > 0.
+func (d *DB) DifficultyBucketAvg(ctx context.Context, bucketSize uint64, fromHeight, toHeight uint64) ([]DifficultyBucketRow, error) {
+	if bucketSize == 0 {
+		return nil, fmt.Errorf("db: difficulty bucket avg: bucket size must be > 0")
+	}
+
+	rows, err := d.Pool.Query(ctx, `
+		SELECT
+			(height / $1) * $1 AS bucket_start,
+			AVG(difficulty) AS avg_difficulty
+		FROM blocks
+		WHERE height BETWEEN $2 AND $3
+		GROUP BY bucket_start
+		ORDER BY bucket_start ASC
+	`, bucketSize, fromHeight, toHeight)
+	if err != nil {
+		return nil, fmt.Errorf("db: difficulty bucket avg: %w", err)
+	}
+	defer rows.Close()
+
+	var out []DifficultyBucketRow
+	for rows.Next() {
+		var r DifficultyBucketRow
+		if err := rows.Scan(&r.BucketStart, &r.AvgDifficulty); err != nil {
+			return nil, fmt.Errorf("db: difficulty bucket avg: scan: %w", err)
+		}
+		r.BucketEnd = r.BucketStart + bucketSize - 1
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}

@@ -1,0 +1,46 @@
+-- 0003_analysis_indexes: supporting indexes for the internal/analysis /
+-- internal/server historical-analysis feature's height-bucketed aggregation queries
+-- (db.AlgoBucketCounts, db.PoolShareBucketCounts, db.BlockTimeDeltaBuckets,
+-- db.BlockTimeSummary, db.DifficultyBucketAvg).
+--
+-- Why these two and not more:
+--
+-- * All five queries filter with `WHERE height BETWEEN $from AND $to` (or, for the
+--   block-time queries, a self-join on `p.height = b.height - 1` layered on top of that
+--   same range filter) before doing their GROUP BY. `blocks` is already keyed by a
+--   BIGINT PRIMARY KEY on `height` (0001_init.up.sql), which Postgres backs with a
+--   unique btree index - so the range scan itself is already indexed for every one of
+--   these queries, including the self-join (each `p.height = ...` lookup is a
+--   single-row PK lookup). No new index is needed just for the bucketing/range-scan
+--   step.
+-- * db.AlgoBucketCounts (COUNT(*) FILTER (WHERE pow_algo = ...) per bucket) already has
+--   idx_blocks_pow_algo (0001_init.up.sql) if the planner ever prefers an algo-first
+--   scan; nothing new needed there either.
+-- * db.PoolShareBucketCounts is the one query that's genuinely underserved by the
+--   existing indexes: its `top_pools` CTE does `GROUP BY pool_tag ORDER BY COUNT(*)
+--   DESC` over the same height range, and the existing idx_blocks_pool_tag
+--   (0001_init.up.sql) is a single-column index on pool_tag alone - useful for
+--   pool_tag-only equality lookups (e.g. "all blocks for pool X", not a range+group
+--   query), but it doesn't help a query that's first filtering by a height range and
+--   then grouping by pool_tag, because Postgres would still need to visit every
+--   height-in-range row via the height PK index and then re-check pool_tag from the
+--   heap (or bounce between the two indexes) rather than getting both the range
+--   selectivity and the grouping key from one index. A composite (height, pool_tag)
+--   index lets the planner satisfy the height range scan AND read pool_tag directly out
+--   of the index (no heap fetch) in one pass - this is the index this migration adds.
+-- * The other pow_algo composite suggested in the task description ((pow_algo, height))
+--   would only help a query that groups by pow_algo first and filters height second;
+--   AlgoBucketCounts does the opposite (height-range-filter, then per-bucket FILTER
+--   counts across all four algos at once), so a leading-pow_algo composite wouldn't
+--   actually be selected over the existing height PK + idx_blocks_pow_algo pair for this
+--   query shape. Skipped as redundant rather than added speculatively (see AGENTS.md:
+--   "don't add redundant indexes").
+-- * idx_blocks_height_difficulty exists purely so DifficultyBucketAvg's `AVG(difficulty)
+--   GROUP BY bucket` can read difficulty straight out of the index alongside the height
+--   range scan, the same index-only-scan rationale as idx_blocks_height_pool_tag above,
+--   without a heap fetch per row for a table that (per the indexer's continuous
+--   backfill/follow modes) is expected to grow into the tens/hundreds of thousands of
+--   rows.
+
+CREATE INDEX IF NOT EXISTS idx_blocks_height_pool_tag ON blocks (height, pool_tag);
+CREATE INDEX IF NOT EXISTS idx_blocks_height_difficulty ON blocks (height, difficulty);
