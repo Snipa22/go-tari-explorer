@@ -11,5 +11,50 @@
     <tr><th>Output Count</th><td>{{.Block.OutputCount}}</td></tr>
     <tr><th>Pool</th><td class="{{.Block.PoolCSSClass}}">{{.Block.PoolDisplay}}</td></tr>
 </table>
+
+<h3>Kernels</h3>
+{{if .Kernels}}
+<table>
+    <thead>
+    <tr><th>#</th><th>Fee</th><th>Features</th><th>Lock Height</th><th>Excess Signature</th></tr>
+    </thead>
+    <tbody>
+    {{range .Kernels}}
+    <tr>
+        <td>{{.Index}}</td>
+        <td>{{.FeeXTM}}</td>
+        <td>{{.Features}}</td>
+        <td>{{.LockHeight}}</td>
+        <td class="hex-cell"><a href="/search?q={{.ExcessSigHex}}" title="{{.ExcessSigHex}}">{{.ExcessSigHexShort}}</a> <a href="/tx-state?excess_sig={{.ExcessSigHex}}" class="tx-state-link">check status</a></td>
+    </tr>
+    {{end}}
+    </tbody>
+</table>
+{{else}}
+<p class="empty-note">No kernels in this block.</p>
+{{end}}
+
+<h3>Outputs</h3>
+{{if .Outputs}}
+<table>
+    <thead>
+    <tr><th>#</th><th>Type</th><th>Maturity</th><th>Coinbase Extra</th><th>Commitment</th></tr>
+    </thead>
+    <tbody>
+    {{range .Outputs}}
+    <tr>
+        <td>{{.Index}}</td>
+        <td>{{.OutputTypeDisplay}}</td>
+        <td>{{.Maturity}}</td>
+        <td>{{.CoinbaseExtraDisplay}}</td>
+        <td class="hex-cell"><a href="/search?q={{.CommitmentHex}}" title="{{.CommitmentHex}}">{{.CommitmentHexShort}}</a></td>
+    </tr>
+    {{end}}
+    </tbody>
+</table>
+{{else}}
+<p class="empty-note">No outputs in this block.</p>
+{{end}}
+
 <p><a href="/">&larr; back to blocks list</a></p>
 {{end}}

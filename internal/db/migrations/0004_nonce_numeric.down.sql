@@ -1,0 +1,3 @@
+-- Revert 0004_nonce_numeric.
+ALTER TABLE blocks ALTER COLUMN nonce TYPE BIGINT;
+ALTER TABLE blocks ALTER COLUMN nonce SET DEFAULT 0;

@@ -174,7 +174,56 @@ func (ix *Indexer) indexBlock(ctx context.Context, block *tari_generated.Block) 
 		OutputCount:       int32(len(outputs)),
 		PoolTag:           poolTag,
 	}
-	return ix.DB.UpsertBlock(ctx, row)
+	if err := ix.DB.UpsertBlock(ctx, row); err != nil {
+		return err
+	}
+	if err := ix.DB.ReplaceKernelsForBlock(ctx, header.GetHeight(), kernelRows(kernels)); err != nil {
+		return fmt.Errorf("indexer: index block %d: %w", header.GetHeight(), err)
+	}
+	if err := ix.DB.ReplaceOutputsForBlock(ctx, header.GetHeight(), outputRows(outputs)); err != nil {
+		return fmt.Errorf("indexer: index block %d: %w", header.GetHeight(), err)
+	}
+	return nil
+}
+
+// kernelRows converts a block body's raw kernels into db.Kernel rows, indexed by their
+// position within the body (matching indexBlock's existing len(kernels) ->
+// db.Block.KernelCount convention).
+func kernelRows(kernels []*tari_generated.TransactionKernel) []db.Kernel {
+	out := make([]db.Kernel, len(kernels))
+	for i, k := range kernels {
+		excessSig := k.GetExcessSig()
+		out[i] = db.Kernel{
+			Index:              int32(i),
+			Features:           uint64(k.GetFeatures()),
+			Fee:                k.GetFee(),
+			LockHeight:         k.GetLockHeight(),
+			Excess:             k.GetExcess(),
+			ExcessSigNonce:     excessSig.GetPublicNonce(),
+			ExcessSigSignature: excessSig.GetSignature(),
+			Hash:               k.GetHash(),
+		}
+	}
+	return out
+}
+
+// outputRows converts a block body's raw outputs into db.Output rows, indexed by their
+// position within the body (matching indexBlock's existing len(outputs) ->
+// db.Block.OutputCount convention).
+func outputRows(outputs []*tari_generated.TransactionOutput) []db.Output {
+	out := make([]db.Output, len(outputs))
+	for i, o := range outputs {
+		features := o.GetFeatures()
+		out[i] = db.Output{
+			Index:           int32(i),
+			FeaturesVersion: features.GetVersion(),
+			OutputType:      features.GetOutputType(),
+			Maturity:        features.GetMaturity(),
+			CoinbaseExtra:   features.GetCoinbaseExtra(),
+			Commitment:      o.GetCommitment(),
+		}
+	}
+	return out
 }
 
 func makeRange(min, max uint64) []uint64 {
