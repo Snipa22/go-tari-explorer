@@ -1,0 +1,10 @@
+{{define "content"}}
+<h2>Historical Analysis</h2>
+<p style="color:#888;">Server-rendered charts over height-bucketed block data. Pick a view:</p>
+<ul>
+    <li><a href="/analysis/algo-distribution">Algo Distribution</a> - block count per pow-algo (RXM/RXT/C29/SHA3X) over height buckets.</li>
+    <li><a href="/analysis/pool-share">Pool Share</a> - block count per pool (top pools + "other"/"unknown") over height buckets.</li>
+    <li><a href="/analysis/block-time">Block Time</a> - median inter-block time over height buckets, plus mean/median/stddev/max summary.</li>
+    <li><a href="/analysis/difficulty">Difficulty</a> - average difficulty over height buckets (hashrate proxy).</li>
+</ul>
+{{end}}

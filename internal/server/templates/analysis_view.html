@@ -1,0 +1,27 @@
+{{define "content"}}
+<h2>{{.Title}}</h2>
+<nav><a href="/analysis">&laquo; Analysis</a></nav>
+<form method="get" style="margin: 1rem 0; color:#999;">
+    <label>Bucket size <input type="number" name="bucket_size" value="{{.Params.BucketSize}}" min="1" style="width:8rem;"></label>
+    <label>From <input type="number" name="from" value="{{.Params.From}}" min="0" style="width:10rem;"></label>
+    <label>To <input type="number" name="to" value="{{.Params.To}}" min="0" style="width:10rem;"></label>
+    <button type="submit">Update</button>
+</form>
+{{if .Error}}
+<p style="color:#ff8080;">Failed to load chart: {{.Error}}</p>
+{{else}}
+{{if .Summary}}
+<div class="stat-grid">
+    <div class="stat-card"><div class="label">Mean (s)</div><div class="value">{{.Summary.Mean}}</div></div>
+    <div class="stat-card"><div class="label">Median (s)</div><div class="value">{{.Summary.Median}}</div></div>
+    <div class="stat-card"><div class="label">StdDev (s)</div><div class="value">{{.Summary.StdDev}}</div></div>
+    <div class="stat-card"><div class="label">Max (s)</div><div class="value">{{.Summary.Max}}</div></div>
+    <div class="stat-card"><div class="label">Samples</div><div class="value">{{.Summary.SampleCount}}</div></div>
+</div>
+{{end}}
+{{if .Difficulty}}
+<p style="color:#888;">Difficulty is used as a hashrate proxy - see doc comment on db.DifficultyBucketRow for why a literal hashrate figure isn't derivable from indexed data alone.</p>
+{{end}}
+<img src="{{.ImgSrc}}" alt="{{.Title}} chart" style="max-width:100%;">
+{{end}}
+{{end}}

@@ -39,11 +39,13 @@ type Server struct {
 	PoolStats poolstats.PoolStatsProvider
 	// PoolStatsBaseURL is displayed on the pool-stats page as a "source" attribution -
 	// purely informational, not used for any request.
-	PoolStatsBaseURL string
-	listTmpl         *template.Template
-	detailTmpl       *template.Template
-	rowsTmpl         *template.Template
-	poolStatsTmpl    *template.Template
+	PoolStatsBaseURL  string
+	listTmpl          *template.Template
+	detailTmpl        *template.Template
+	rowsTmpl          *template.Template
+	poolStatsTmpl     *template.Template
+	analysisIndexTmpl *template.Template
+	analysisViewTmpl  *template.Template
 }
 
 // New parses the embedded templates and constructs a Server. Returns an error if the
@@ -65,14 +67,24 @@ func New(database *db.DB, poolStatsProvider poolstats.PoolStatsProvider, poolSta
 	if err != nil {
 		return nil, fmt.Errorf("server: parse pool stats template: %w", err)
 	}
+	analysisIndexTmpl, err := template.New("layout.html").Funcs(funcs).ParseFS(templateFS, "templates/layout.html", "templates/analysis.html")
+	if err != nil {
+		return nil, fmt.Errorf("server: parse analysis index template: %w", err)
+	}
+	analysisViewTmpl, err := template.New("layout.html").Funcs(funcs).ParseFS(templateFS, "templates/layout.html", "templates/analysis_view.html")
+	if err != nil {
+		return nil, fmt.Errorf("server: parse analysis view template: %w", err)
+	}
 	return &Server{
-		DB:               database,
-		PoolStats:        poolStatsProvider,
-		PoolStatsBaseURL: poolStatsBaseURL,
-		listTmpl:         listTmpl,
-		detailTmpl:       detailTmpl,
-		rowsTmpl:         rowsTmpl,
-		poolStatsTmpl:    poolStatsTmpl,
+		DB:                database,
+		PoolStats:         poolStatsProvider,
+		PoolStatsBaseURL:  poolStatsBaseURL,
+		listTmpl:          listTmpl,
+		detailTmpl:        detailTmpl,
+		rowsTmpl:          rowsTmpl,
+		poolStatsTmpl:     poolStatsTmpl,
+		analysisIndexTmpl: analysisIndexTmpl,
+		analysisViewTmpl:  analysisViewTmpl,
 	}, nil
 }
 
@@ -83,6 +95,15 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /blocks/partial", s.handleBlocksPartial)
 	mux.HandleFunc("GET /blocks/{height}", s.handleBlockDetail)
 	mux.HandleFunc("GET /pool-stats", s.handlePoolStats)
+	mux.HandleFunc("GET /analysis", s.handleAnalysisIndex)
+	mux.HandleFunc("GET /analysis/algo-distribution", s.handleAnalysisAlgoDistribution)
+	mux.HandleFunc("GET /analysis/pool-share", s.handleAnalysisPoolShare)
+	mux.HandleFunc("GET /analysis/block-time", s.handleAnalysisBlockTime)
+	mux.HandleFunc("GET /analysis/difficulty", s.handleAnalysisDifficulty)
+	mux.HandleFunc("GET /analysis/algo-distribution.png", s.handleAnalysisAlgoDistributionPNG)
+	mux.HandleFunc("GET /analysis/pool-share.png", s.handleAnalysisPoolSharePNG)
+	mux.HandleFunc("GET /analysis/block-time.png", s.handleAnalysisBlockTimePNG)
+	mux.HandleFunc("GET /analysis/difficulty.png", s.handleAnalysisDifficultyPNG)
 	return mux
 }
 
