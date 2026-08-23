@@ -29,6 +29,29 @@ const DefaultBucketSize = 1000
 // the long tail beyond that is exactly what "other" exists to absorb.
 const DefaultTopPools = 8
 
+// DefaultPoolTagMappings is the "known tag-family -> canonical display name" mapping
+// (see db.PoolTagMapping) used by the pool-share chart and the per-pool algo-breakdown
+// view to fold a single pool operator's per-node/per-worker pool_tag values into one
+// display series, rather than one series per physical node.
+//
+// This is a general, data-driven mechanism, not a one-off special case for the repo
+// owner's own pool: any other pool operator whose pool_tag values fragment the same
+// way (shared prefix, per-node/per-worker suffix) can be added here as one more
+// {MatchPrefix, CanonicalName} entry - no code changes required in db/analysis/server.
+//
+// The single entry below (WUF -> "Jagtech") is the repo owner's own pool
+// infrastructure. Verified directly against live production data (query:
+// `SELECT DISTINCT pool_tag FROM blocks WHERE pool_tag LIKE 'WUF%'` against the
+// tari_explorer database, 2026-08-23) that the WUF prefix covers every currently
+// fragmented pool_tag family in the table (active node family "Jagtech", legacy/
+// inactive node names "Ahri"/"Nytro"/"Taila"/"Ara-Ayn"/"Nia-Mio"/"Stratum"/
+// "Graha'tia"/"Y'shtola") - all of it the same pool operator's infrastructure sharing
+// the "WUF" coinbase-extra prefix - and that no other pool currently listed in
+// prefixTable (e.g. pool.kryptex.com) exhibits this problem, so it needs no entry here.
+var DefaultPoolTagMappings = []db.PoolTagMapping{
+	{MatchPrefix: "WUF", CanonicalName: "Jagtech"},
+}
+
 // AlgoOrder is the fixed stack/legend order used for the algo-distribution chart,
 // matching db.AlgoBucketRow's field order (and cmd/algobuckets' table column order).
 var AlgoOrder = []string{"RXM", "RXT", "C29", "SHA3X"}
@@ -57,15 +80,19 @@ func AlgoDistribution(ctx context.Context, database *db.DB, bucketSize, fromHeig
 }
 
 // PoolShare loads db.PoolShareBucketCounts for [fromHeight, toHeight] (capped to topN
-// distinct pool tags, see db.PoolShareBucketCounts) and reshapes its "long" row format
-// (one row per bucket+pool combination) into chartrender.Points (one per bucket, one
-// Series entry per pool key) plus a deterministic series order for
+// distinct mapped pool tags, see db.PoolShareBucketCounts) and reshapes its "long" row
+// format (one row per bucket+pool combination) into chartrender.Points (one per bucket,
+// one Series entry per pool key) plus a deterministic series order for
 // chartrender.StackedAreaChart: pool keys ordered by total block count across the
 // queried range descending, with "unknown" and "other" always sorted last (in that
 // order) regardless of their totals, so the "real pool" bands stack together below the
 // catch-all bands at the top rather than an arbitrary/unstable interleaving.
-func PoolShare(ctx context.Context, database *db.DB, bucketSize, fromHeight, toHeight uint64, topN int) ([]chartrender.Point, []string, error) {
-	rows, err := database.PoolShareBucketCounts(ctx, bucketSize, fromHeight, toHeight, topN)
+//
+// mappings folds known tag families (e.g. every WUFJagtech*/WUF  Ahri   -shaped tag)
+// into one canonical series before the topN/ordering logic runs - see
+// db.PoolTagMapping and DefaultPoolTagMappings. Pass nil to disable folding entirely.
+func PoolShare(ctx context.Context, database *db.DB, bucketSize, fromHeight, toHeight uint64, topN int, mappings []db.PoolTagMapping) ([]chartrender.Point, []string, error) {
+	rows, err := database.PoolShareBucketCounts(ctx, bucketSize, fromHeight, toHeight, topN, mappings)
 	if err != nil {
 		return nil, nil, fmt.Errorf("analysis: pool share: %w", err)
 	}
@@ -168,4 +195,35 @@ func Difficulty(ctx context.Context, database *db.DB, bucketSize, fromHeight, to
 		points[i] = chartrender.Point{X: float64(r.BucketStart), Series: map[string]float64{difficultySeriesName: r.AvgDifficulty}}
 	}
 	return points, difficultySeriesName, nil
+}
+
+// PoolAlgoBreakdown loads db.AlgoBucketCountsForPool for [fromHeight, toHeight], scoped
+// to canonicalName via mappings (see db.PoolTagMapping / db.AlgoBucketCountsForPool),
+// and reshapes it into chartrender.Points using the same RXM/RXT/C29/SHA3X series shape
+// as AlgoDistribution - this is AlgoDistribution filtered down to one pool operator's
+// merged tag family, showing which algo(s) that operator's nodes actually mine.
+//
+// This is a general mechanism, not hardcoded to any one pool: canonicalName is any
+// name present in mappings' CanonicalName fields (or, if absent from mappings, treated
+// as a literal unmapped pool_tag - see db.AlgoBucketCountsForPool), so it works for
+// the repo owner's own "Jagtech" series today and for any other pool operator's merged
+// series added to the mapping later.
+func PoolAlgoBreakdown(ctx context.Context, database *db.DB, bucketSize, fromHeight, toHeight uint64, mappings []db.PoolTagMapping, canonicalName string) ([]chartrender.Point, []string, error) {
+	rows, err := database.AlgoBucketCountsForPool(ctx, bucketSize, fromHeight, toHeight, mappings, canonicalName)
+	if err != nil {
+		return nil, nil, fmt.Errorf("analysis: pool algo breakdown: %w", err)
+	}
+	points := make([]chartrender.Point, len(rows))
+	for i, r := range rows {
+		points[i] = chartrender.Point{
+			X: float64(r.BucketStart),
+			Series: map[string]float64{
+				"RXM":   float64(r.RXM),
+				"RXT":   float64(r.RXT),
+				"C29":   float64(r.C29),
+				"SHA3X": float64(r.SHA3X),
+			},
+		}
+	}
+	return points, AlgoOrder, nil
 }

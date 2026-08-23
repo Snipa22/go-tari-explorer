@@ -1,10 +1,13 @@
 {{define "content"}}
 <h2>{{.Title}}</h2>
-<nav><a href="/analysis">&laquo; Analysis</a></nav>
+<nav><a href="/analysis">&laquo; Analysis</a>{{if eq .Title "Pool Share"}} | <a href="/analysis/pool-algo-breakdown">Pool Algo Breakdown &raquo;</a>{{end}}</nav>
 <form method="get" style="margin: 1rem 0; color:#999;">
     <label>Bucket size <input type="number" name="bucket_size" value="{{.Params.BucketSize}}" min="1" style="width:8rem;"></label>
     <label>From <input type="number" name="from" value="{{.Params.From}}" min="0" style="width:10rem;"></label>
     <label>To <input type="number" name="to" value="{{.Params.To}}" min="0" style="width:10rem;"></label>
+    {{if .PoolField}}
+    <label>Pool <input type="text" name="pool" value="{{.Pool}}" style="width:10rem;"></label>
+    {{end}}
     <button type="submit">Update</button>
 </form>
 {{if .Error}}
@@ -21,6 +24,9 @@
 {{end}}
 {{if .Difficulty}}
 <p style="color:#888;">Difficulty is used as a hashrate proxy - see doc comment on db.DifficultyBucketRow for why a literal hashrate figure isn't derivable from indexed data alone.</p>
+{{end}}
+{{if .PoolField}}
+<p style="color:#888;">Algo breakdown for the merged pool series named above (see internal/analysis.DefaultPoolTagMappings for the tag-family -> canonical-name mapping this pulls from).</p>
 {{end}}
 <img src="{{.ImgSrc}}" alt="{{.Title}} chart" style="max-width:100%;">
 {{end}}

@@ -83,6 +83,23 @@ type knownPrefix struct {
 // this only drives the IsOwnPool boolean.
 const ourPoolPrefix = "WUF"
 
+// ourPoolTagLen is the fixed byte length own-pool coinbase-extra tags are truncated to
+// before being stored as PoolTag. Ported directly from go-tari-grpc-lib's
+// cmd/blockWinners/main.go (txExtraParser), which truncates via txString[0:12] rather
+// than keeping the whole printable-filtered string.
+//
+// Why 12, and why truncate at all: confirmed against live production data (query:
+// SELECT DISTINCT pool_tag FROM blocks WHERE pool_tag LIKE 'WUF%' against the
+// tari_explorer database) that every real own-pool coinbase_extra is genuinely,
+// deterministically exactly 12 bytes long when hex-decoded (e.g. "WUFJagtechE0",
+// "WUF  Ahri   ", "WUF  Nytro  ", "WUF  Taila  "). Anything beyond byte 12 is
+// non-identifying binary/padding noise, not a legitimate variable-length "worker ID"
+// feature - an earlier version of this package's rebuild dropped the truncation this
+// constant restores, which fragmented what should be ~55-60 real per-node pool tags
+// into ~45,900 spurious distinct values in the blocks table (one per garbage-suffix
+// variant). Keep this in sync with the reference implementation if it ever changes.
+const ourPoolTagLen = 12
+
 // prefixTable is the cleaned-up replacement for the original CLI's chain of
 // strings.HasPrefix checks. Extend this table as new pools are identified via chain
 // survey (see https://core.tari.jagtech.io/winners_1000.txt for real-world examples)
@@ -141,7 +158,7 @@ func attributeExtra(height uint64, algo PowAlgo, txExtra []byte) BlockAttributio
 		return BlockAttribution{
 			BlockHeight: height,
 			PowAlgo:     algo,
-			PoolTag:     raw,
+			PoolTag:     truncatePoolTag(raw, ourPoolTagLen),
 			RawExtra:    raw,
 			IsOwnPool:   true,
 		}
@@ -170,6 +187,16 @@ func attributeExtra(height uint64, algo PowAlgo, txExtra []byte) BlockAttributio
 		IsOwnPool:   false,
 		Reason:      ReasonUnknownTxExtra,
 	}
+}
+
+// truncatePoolTag clamps s to at most n bytes, matching the reference CLI's
+// txString[0:12] slice while gracefully handling any real-world extra shorter than n
+// (rather than panicking with an index-out-of-range on a slice bound past len(s)).
+func truncatePoolTag(s string, n int) string {
+	if len(s) < n {
+		return s
+	}
+	return s[:n]
 }
 
 // printableOnly strips non-printable runes from raw coinbase-extra bytes, matching the

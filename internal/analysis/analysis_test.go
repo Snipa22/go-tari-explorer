@@ -130,9 +130,9 @@ func TestPoolShare(t *testing.T) {
 	seedBlock(t, database, 5, 1050, "RXM", 100, poolC)
 	seedBlock(t, database, 6, 1060, "RXM", 100, nil)
 
-	// topN=2: poolA + poolB are kept as their own series, poolC folds into "other",
-	// nil folds into "unknown".
-	points, order, err := PoolShare(ctx, database, 1000, 0, 999, 2)
+	// topN=2, no mappings: poolA + poolB are kept as their own series, poolC folds
+	// into "other", nil folds into "unknown".
+	points, order, err := PoolShare(ctx, database, 1000, 0, 999, 2, nil)
 	if err != nil {
 		t.Fatalf("PoolShare: %v", err)
 	}
@@ -161,6 +161,129 @@ func TestPoolShare(t *testing.T) {
 		if order[i] != name {
 			t.Errorf("order[%d] = %q, want %q (full order %v)", i, order[i], name, order)
 		}
+	}
+}
+
+// TestPoolShare_WithMappings proves the WUF-family folding mechanism itself: multiple
+// distinct WUF-prefixed pool_tag values (different node suffixes) must be merged into
+// one "Jagtech" series, while a non-WUF pool tag and a NULL pool_tag remain their own
+// separate series.
+func TestPoolShare_WithMappings(t *testing.T) {
+	database := setupTestDB(t)
+	ctx := context.Background()
+
+	e0, s1, ahri := strPtr("WUFJagtechE0"), strPtr("WUFJagtechS1"), strPtr("WUF  Ahri   ")
+	other := strPtr("pool.kryptex.com")
+	// Bucket [0,999]: WUFJagtechE0 x2, WUFJagtechS1 x2, WUF  Ahri   x1 (all "Jagtech"
+	// once mapped = 5), pool.kryptex.com x2 (unmapped, own series), nil x1 (unknown).
+	seedBlock(t, database, 0, 1000, "RXM", 100, e0)
+	seedBlock(t, database, 1, 1010, "RXM", 100, e0)
+	seedBlock(t, database, 2, 1020, "RXT", 100, s1)
+	seedBlock(t, database, 3, 1030, "C29", 100, s1)
+	seedBlock(t, database, 4, 1040, "SHA3X", 100, ahri)
+	seedBlock(t, database, 5, 1050, "RXM", 100, other)
+	seedBlock(t, database, 6, 1060, "RXM", 100, other)
+	seedBlock(t, database, 7, 1070, "RXM", 100, nil)
+
+	mappings := []db.PoolTagMapping{{MatchPrefix: "WUF", CanonicalName: "Jagtech"}}
+	points, order, err := PoolShare(ctx, database, 1000, 0, 999, 8, mappings)
+	if err != nil {
+		t.Fatalf("PoolShare: %v", err)
+	}
+	if len(points) != 1 {
+		t.Fatalf("len(points) = %d, want 1", len(points))
+	}
+	series := points[0].Series
+	if series["Jagtech"] != 5 {
+		t.Errorf("Jagtech = %v, want 5 (merged WUFJagtechE0+WUFJagtechS1+WUF  Ahri   )", series["Jagtech"])
+	}
+	if series["pool.kryptex.com"] != 2 {
+		t.Errorf("pool.kryptex.com = %v, want 2 (must stay its own series, unaffected by WUF mapping)", series["pool.kryptex.com"])
+	}
+	if series["unknown"] != 1 {
+		t.Errorf("unknown = %v, want 1", series["unknown"])
+	}
+	if _, ok := series["WUFJagtechE0"]; ok {
+		t.Errorf("raw WUFJagtechE0 must not appear as its own series once mapped, got series=%+v", series)
+	}
+	wantOrder := []string{"Jagtech", "pool.kryptex.com", "unknown"}
+	if len(order) != len(wantOrder) {
+		t.Fatalf("order = %v, want %v", order, wantOrder)
+	}
+	for i, name := range wantOrder {
+		if order[i] != name {
+			t.Errorf("order[%d] = %q, want %q (full order %v)", i, order[i], name, order)
+		}
+	}
+}
+
+// TestPoolAlgoBreakdown proves the per-pool algo-breakdown query correctly scopes to a
+// merged canonical pool name across multiple raw pool_tag prefixes, with real
+// multi-algo fixture rows for the merged pool.
+func TestPoolAlgoBreakdown(t *testing.T) {
+	database := setupTestDB(t)
+	ctx := context.Background()
+
+	e0, s1, ahri := strPtr("WUFJagtechE0"), strPtr("WUFJagtechS1"), strPtr("WUF  Ahri   ")
+	other := strPtr("pool.kryptex.com")
+	// Bucket [0,999]: Jagtech-family blocks split across algos: RXM x2 (e0), RXT x1
+	// (s1), C29 x1 (s1), SHA3X x1 (ahri). Plus a non-WUF pool block that must NOT be
+	// counted in the breakdown.
+	seedBlock(t, database, 0, 1000, "RXM", 100, e0)
+	seedBlock(t, database, 1, 1010, "RXM", 100, e0)
+	seedBlock(t, database, 2, 1020, "RXT", 100, s1)
+	seedBlock(t, database, 3, 1030, "C29", 100, s1)
+	seedBlock(t, database, 4, 1040, "SHA3X", 100, ahri)
+	seedBlock(t, database, 5, 1050, "RXM", 100, other)
+
+	mappings := []db.PoolTagMapping{{MatchPrefix: "WUF", CanonicalName: "Jagtech"}}
+	points, order, err := PoolAlgoBreakdown(ctx, database, 1000, 0, 999, mappings, "Jagtech")
+	if err != nil {
+		t.Fatalf("PoolAlgoBreakdown: %v", err)
+	}
+	if len(order) != len(AlgoOrder) {
+		t.Fatalf("order = %v, want %v", order, AlgoOrder)
+	}
+	if len(points) != 1 {
+		t.Fatalf("len(points) = %d, want 1", len(points))
+	}
+	series := points[0].Series
+	if series["RXM"] != 2 {
+		t.Errorf("RXM = %v, want 2", series["RXM"])
+	}
+	if series["RXT"] != 1 {
+		t.Errorf("RXT = %v, want 1", series["RXT"])
+	}
+	if series["C29"] != 1 {
+		t.Errorf("C29 = %v, want 1", series["C29"])
+	}
+	if series["SHA3X"] != 1 {
+		t.Errorf("SHA3X = %v, want 1", series["SHA3X"])
+	}
+}
+
+// TestPoolAlgoBreakdown_UnmappedLiteral proves the same endpoint works for a canonical
+// name absent from mappings entirely - treated as an exact, literal pool_tag match, so
+// a pool operator who never needs per-node folding can still use this view.
+func TestPoolAlgoBreakdown_UnmappedLiteral(t *testing.T) {
+	database := setupTestDB(t)
+	ctx := context.Background()
+
+	kryptex := strPtr("pool.kryptex.com")
+	seedBlock(t, database, 0, 1000, "RXM", 100, kryptex)
+	seedBlock(t, database, 1, 1010, "SHA3X", 100, kryptex)
+
+	mappings := []db.PoolTagMapping{{MatchPrefix: "WUF", CanonicalName: "Jagtech"}}
+	points, _, err := PoolAlgoBreakdown(ctx, database, 1000, 0, 999, mappings, "pool.kryptex.com")
+	if err != nil {
+		t.Fatalf("PoolAlgoBreakdown: %v", err)
+	}
+	if len(points) != 1 {
+		t.Fatalf("len(points) = %d, want 1", len(points))
+	}
+	series := points[0].Series
+	if series["RXM"] != 1 || series["SHA3X"] != 1 {
+		t.Errorf("series = %+v, want RXM=1 SHA3X=1", series)
 	}
 }
 
