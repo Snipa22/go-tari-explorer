@@ -592,6 +592,29 @@ func (d *DB) AlgoBucketCounts(ctx context.Context, bucketSize uint64, fromHeight
 	return out, rows.Err()
 }
 
+// PoolTagMapping is one entry in an ordered "known tag-family -> canonical display
+// name" mapping, used to fold a single pool operator's multiple per-node/per-worker
+// pool_tag values (e.g. WUFJagtechE0, WUFJagtechS1, WUF  Ahri   , ...) into one display
+// series for the pool-share chart, and to select that same family for the per-pool
+// algo-breakdown view. This is a display/query-layer concept only: it is evaluated
+// entirely inside PoolShareBucketCounts/AlgoBucketCountsForPool's SQL and never writes
+// back to (or reads a decision from) the stored pool_tag column - internal/poolattr's
+// attribution logic is unaffected by this mapping.
+//
+// MatchPrefix is checked via `pool_tag LIKE MatchPrefix || '%'`. Callers pass an
+// ordered []PoolTagMapping; entries are tried in order and the first match wins, so
+// list more specific prefixes before more general ones if that ever matters. A
+// pool_tag that matches no entry falls back to being its own series, unchanged from
+// this mechanism not existing at all - so adding no entries (nil/empty slice)
+// reproduces the pre-mapping behavior exactly, and adding a second pool operator's
+// per-node family later is just appending one more {MatchPrefix, CanonicalName} entry,
+// not a new code path. See internal/analysis.DefaultPoolTagMappings for the current
+// production entry (WUF -> Jagtech) and how it was derived from live data.
+type PoolTagMapping struct {
+	MatchPrefix   string
+	CanonicalName string
+}
+
 // PoolShareBucketRow is one (bucket, pool) row of the height-bucketed pool market-share
 // report: how many blocks in [BucketStart, BucketEnd] were attributed to PoolTag.
 // PoolTag is either a real pool_tag value, the literal string "unknown" (blocks with a
@@ -609,21 +632,27 @@ type PoolShareBucketRow struct {
 
 // PoolShareBucketCounts groups blocks in [fromHeight, toHeight] (inclusive) into the
 // same height buckets as AlgoBucketCounts, and within each bucket counts how many
-// blocks were mined by each pool_tag. To keep the result (and any legend built from it)
-// bounded, only the topN pool tags by total block count over the whole queried range
-// are kept as their own series; every other non-null pool_tag is folded into a single
-// "other" series, and NULL pool_tag (unattributed blocks) is always its own "unknown"
-// series regardless of topN. topN is a caller-supplied cap (the analysis HTTP handlers
-// default to 8, chosen as a reasonable legend size for a chart embedded at normal page
-// width - see internal/server/analysis.go) rather than hardcoded here, so callers can
-// tune it.
+// blocks were mined by each pool_tag - after first folding pool_tag through mappings
+// (see PoolTagMapping's doc comment): any pool_tag matching a mapping entry's
+// MatchPrefix is counted under that entry's CanonicalName instead of its own raw
+// pool_tag, so e.g. every WUFJagtech* / WUF  Ahri   -shaped tag can land in one
+// "Jagtech" series rather than one series per physical node. mappings may be nil/empty
+// to disable this folding entirely (pre-mapping behavior).
 //
-// As with AlgoBucketCounts, all aggregation (bucketing, top-N ranking, grouping) happens
-// Postgres-side via a CTE + GROUP BY - raw block rows are never pulled into Go to
-// aggregate here. Results are ordered by bucket_start, then pool_tag, ascending.
-// bucketSize must be > 0 and topN must be >= 0 (0 means every non-null pool_tag folds
-// into "other").
-func (d *DB) PoolShareBucketCounts(ctx context.Context, bucketSize uint64, fromHeight, toHeight uint64, topN int) ([]PoolShareBucketRow, error) {
+// To keep the result (and any legend built from it) bounded, only the topN mapped
+// tags by total block count over the whole queried range are kept as their own series;
+// every other non-null mapped tag is folded into a single "other" series, and NULL
+// pool_tag (unattributed blocks) is always its own "unknown" series regardless of
+// topN. topN is a caller-supplied cap (the analysis HTTP handlers default to 8, chosen
+// as a reasonable legend size for a chart embedded at normal page width - see
+// internal/server/analysis.go) rather than hardcoded here, so callers can tune it.
+//
+// As with AlgoBucketCounts, all aggregation (mapping, bucketing, top-N ranking,
+// grouping) happens Postgres-side via a CTE + GROUP BY - raw block rows are never
+// pulled into Go to aggregate here. Results are ordered by bucket_start, then pool_tag,
+// ascending. bucketSize must be > 0 and topN must be >= 0 (0 means every non-null
+// mapped tag folds into "other").
+func (d *DB) PoolShareBucketCounts(ctx context.Context, bucketSize uint64, fromHeight, toHeight uint64, topN int, mappings []PoolTagMapping) ([]PoolShareBucketRow, error) {
 	if bucketSize == 0 {
 		return nil, fmt.Errorf("db: pool share bucket counts: bucket size must be > 0")
 	}
@@ -631,12 +660,35 @@ func (d *DB) PoolShareBucketCounts(ctx context.Context, bucketSize uint64, fromH
 		return nil, fmt.Errorf("db: pool share bucket counts: topN must be >= 0")
 	}
 
-	rows, err := d.Pool.Query(ctx, `
-		WITH top_pools AS (
-			SELECT pool_tag
+	// args starts with the 4 fixed positional params ($1 bucketSize, $2 from,
+	// $3 to, $4 topN); each mapping entry then appends its own (LIKE pattern,
+	// canonical name) pair as two more params, referenced by position in the CASE
+	// expression built below.
+	args := []interface{}{bucketSize, fromHeight, toHeight, topN}
+	var caseClauses strings.Builder
+	for _, m := range mappings {
+		args = append(args, m.MatchPrefix+"%", m.CanonicalName)
+		patternParam := len(args) - 1
+		nameParam := len(args)
+		fmt.Fprintf(&caseClauses, "\n				WHEN pool_tag LIKE $%d THEN $%d", patternParam, nameParam)
+	}
+
+	query := fmt.Sprintf(`
+		WITH mapped AS (
+			SELECT
+				height,
+				CASE
+					WHEN pool_tag IS NULL THEN NULL%s
+					ELSE pool_tag
+				END AS mapped_tag
 			FROM blocks
-			WHERE height BETWEEN $2 AND $3 AND pool_tag IS NOT NULL
-			GROUP BY pool_tag
+			WHERE height BETWEEN $2 AND $3
+		),
+		top_pools AS (
+			SELECT mapped_tag
+			FROM mapped
+			WHERE mapped_tag IS NOT NULL
+			GROUP BY mapped_tag
 			ORDER BY COUNT(*) DESC
 			LIMIT $4
 		),
@@ -644,18 +696,19 @@ func (d *DB) PoolShareBucketCounts(ctx context.Context, bucketSize uint64, fromH
 			SELECT
 				(height / $1) * $1 AS bucket_start,
 				CASE
-					WHEN pool_tag IS NULL THEN 'unknown'
-					WHEN pool_tag IN (SELECT pool_tag FROM top_pools) THEN pool_tag
+					WHEN mapped_tag IS NULL THEN 'unknown'
+					WHEN mapped_tag IN (SELECT mapped_tag FROM top_pools) THEN mapped_tag
 					ELSE 'other'
 				END AS pool_key
-			FROM blocks
-			WHERE height BETWEEN $2 AND $3
+			FROM mapped
 		)
 		SELECT bucket_start, pool_key, COUNT(*) AS block_count
 		FROM classified
 		GROUP BY bucket_start, pool_key
 		ORDER BY bucket_start ASC, pool_key ASC
-	`, bucketSize, fromHeight, toHeight, topN)
+	`, caseClauses.String())
+
+	rows, err := d.Pool.Query(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("db: pool share bucket counts: %w", err)
 	}
@@ -666,6 +719,73 @@ func (d *DB) PoolShareBucketCounts(ctx context.Context, bucketSize uint64, fromH
 		var r PoolShareBucketRow
 		if err := rows.Scan(&r.BucketStart, &r.PoolTag, &r.Count); err != nil {
 			return nil, fmt.Errorf("db: pool share bucket counts: scan: %w", err)
+		}
+		r.BucketEnd = r.BucketStart + bucketSize - 1
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
+// AlgoBucketCountsForPool is AlgoBucketCounts scoped to a single canonical pool name
+// from a PoolTagMapping list (see that type's doc comment) - the per-pool algo-
+// breakdown view's query. canonicalName is looked up against mappings: every
+// MatchPrefix entry whose CanonicalName equals canonicalName contributes a
+// `pool_tag LIKE prefix || '%'` clause (OR'd together), so a merged series like
+// "Jagtech" that spans multiple raw pool_tag prefixes is still scoped correctly. If no
+// mapping entry has that CanonicalName, canonicalName is instead treated as a literal,
+// unmapped pool_tag value (exact match) - so this same endpoint also works for a pool
+// operator who hasn't (yet, or ever needs to) fragment their tags across mapping
+// entries, keeping the mechanism general rather than tied to any specific mapping.
+// bucketSize must be > 0; canonicalName must be non-empty.
+func (d *DB) AlgoBucketCountsForPool(ctx context.Context, bucketSize uint64, fromHeight, toHeight uint64, mappings []PoolTagMapping, canonicalName string) ([]AlgoBucketRow, error) {
+	if bucketSize == 0 {
+		return nil, fmt.Errorf("db: algo bucket counts for pool: bucket size must be > 0")
+	}
+	if canonicalName == "" {
+		return nil, fmt.Errorf("db: algo bucket counts for pool: canonicalName must be non-empty")
+	}
+
+	args := []interface{}{bucketSize, fromHeight, toHeight}
+	var poolClauses []string
+	for _, m := range mappings {
+		if m.CanonicalName != canonicalName {
+			continue
+		}
+		args = append(args, m.MatchPrefix+"%")
+		poolClauses = append(poolClauses, fmt.Sprintf("pool_tag LIKE $%d", len(args)))
+	}
+	var poolFilter string
+	if len(poolClauses) > 0 {
+		poolFilter = "(" + strings.Join(poolClauses, " OR ") + ")"
+	} else {
+		args = append(args, canonicalName)
+		poolFilter = fmt.Sprintf("pool_tag = $%d", len(args))
+	}
+
+	query := fmt.Sprintf(`
+		SELECT
+			(height / $1) * $1 AS bucket_start,
+			COUNT(*) FILTER (WHERE pow_algo = 'RXM')   AS rxm,
+			COUNT(*) FILTER (WHERE pow_algo = 'RXT')   AS rxt,
+			COUNT(*) FILTER (WHERE pow_algo = 'C29')   AS c29,
+			COUNT(*) FILTER (WHERE pow_algo = 'SHA3X') AS sha3x
+		FROM blocks
+		WHERE height BETWEEN $2 AND $3 AND %s
+		GROUP BY bucket_start
+		ORDER BY bucket_start ASC
+	`, poolFilter)
+
+	rows, err := d.Pool.Query(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("db: algo bucket counts for pool: %w", err)
+	}
+	defer rows.Close()
+
+	var out []AlgoBucketRow
+	for rows.Next() {
+		var r AlgoBucketRow
+		if err := rows.Scan(&r.BucketStart, &r.RXM, &r.RXT, &r.C29, &r.SHA3X); err != nil {
+			return nil, fmt.Errorf("db: algo bucket counts for pool: scan: %w", err)
 		}
 		r.BucketEnd = r.BucketStart + bucketSize - 1
 		out = append(out, r)

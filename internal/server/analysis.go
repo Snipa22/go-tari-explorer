@@ -7,6 +7,7 @@
 package server
 
 import (
+	"fmt"
 	"html/template"
 	"log"
 	"net/http"
@@ -91,6 +92,11 @@ type analysisViewData struct {
 	Error      string
 	Summary    *blockTimeSummaryView
 	Difficulty bool
+	// PoolField/Pool are set only by the pool-algo-breakdown view, which needs an
+	// extra "pool" query param the other 4 analysis views don't have. Zero value
+	// (PoolField == false) hides the extra form field for every other view.
+	PoolField bool
+	Pool      string
 }
 
 // blockTimeSummaryView adapts db.BlockTimeSummaryRow for template rendering, pre-
@@ -140,7 +146,7 @@ func (s *Server) handleAnalysisAlgoDistribution(w http.ResponseWriter, r *http.R
 func (s *Server) handleAnalysisPoolShare(w http.ResponseWriter, r *http.Request) {
 	p := s.parseAnalysisParams(r)
 	data := analysisViewData{Title: "Pool Share", ImgSrc: imgSrc("/analysis/pool-share.png", p), Params: p}
-	if _, _, err := analysis.PoolShare(r.Context(), s.DB, p.BucketSize, p.From, p.To, analysis.DefaultTopPools); err != nil {
+	if _, _, err := analysis.PoolShare(r.Context(), s.DB, p.BucketSize, p.From, p.To, analysis.DefaultTopPools, analysis.DefaultPoolTagMappings); err != nil {
 		log.Printf("server: analysis pool share: %v", err)
 		data.Error = "unable to load chart data"
 	}
@@ -177,6 +183,57 @@ func (s *Server) handleAnalysisDifficulty(w http.ResponseWriter, r *http.Request
 	}
 }
 
+// defaultPoolAlgoBreakdownPool is the canonical pool name the /analysis/pool-algo-
+// breakdown view/PNG default to when no ?pool= is supplied: the first entry in
+// analysis.DefaultPoolTagMappings, which is the repo owner's own pool. The route
+// itself is not hardcoded to this pool - any canonical name from the mapping (or, per
+// db.AlgoBucketCountsForPool, any literal unmapped pool_tag) can be passed via ?pool=.
+func defaultPoolAlgoBreakdownPool() string {
+	if len(analysis.DefaultPoolTagMappings) == 0 {
+		return ""
+	}
+	return analysis.DefaultPoolTagMappings[0].CanonicalName
+}
+
+// poolAlgoBreakdownImgSrc builds the `<img src>` value for the pool-algo-breakdown PNG
+// endpoint, extending imgSrc's params with the pool name, matching the existing
+// analysisParams.String()-based pattern.
+func poolAlgoBreakdownImgSrc(pngPath, pool string, p analysisParams) template.URL {
+	return template.URL(pngPath + "?" + p.String() + "&pool=" + template.URLQueryEscaper(pool))
+}
+
+// parsePoolAlgoBreakdownPool reads ?pool= from the request, defaulting to
+// defaultPoolAlgoBreakdownPool() when absent/blank - same graceful-default philosophy
+// as parseAnalysisParams (a bad/missing param degrades to a sensible default rather
+// than a 400, since this is a read-only reporting page).
+func parsePoolAlgoBreakdownPool(r *http.Request) string {
+	if pool := r.URL.Query().Get("pool"); pool != "" {
+		return pool
+	}
+	return defaultPoolAlgoBreakdownPool()
+}
+
+func (s *Server) handleAnalysisPoolAlgoBreakdown(w http.ResponseWriter, r *http.Request) {
+	p := s.parseAnalysisParams(r)
+	pool := parsePoolAlgoBreakdownPool(r)
+	data := analysisViewData{
+		Title:     "Pool Algo Breakdown",
+		ImgSrc:    poolAlgoBreakdownImgSrc("/analysis/pool-algo-breakdown.png", pool, p),
+		Params:    p,
+		PoolField: true,
+		Pool:      pool,
+	}
+	if pool == "" {
+		data.Error = "no pool specified and no default pool tag mapping configured"
+	} else if _, _, err := analysis.PoolAlgoBreakdown(r.Context(), s.DB, p.BucketSize, p.From, p.To, analysis.DefaultPoolTagMappings, pool); err != nil {
+		log.Printf("server: analysis pool algo breakdown: %v", err)
+		data.Error = "unable to load chart data"
+	}
+	if err := s.analysisViewTmpl.Execute(w, data); err != nil {
+		log.Printf("server: render analysis pool algo breakdown: %v", err)
+	}
+}
+
 // writePNG writes chart PNG bytes with the correct Content-Type, or a 500 on error.
 func writePNG(w http.ResponseWriter, png []byte, err error, logCtx string) {
 	if err != nil {
@@ -203,7 +260,7 @@ func (s *Server) handleAnalysisAlgoDistributionPNG(w http.ResponseWriter, r *htt
 
 func (s *Server) handleAnalysisPoolSharePNG(w http.ResponseWriter, r *http.Request) {
 	p := s.parseAnalysisParams(r)
-	points, order, err := analysis.PoolShare(r.Context(), s.DB, p.BucketSize, p.From, p.To, analysis.DefaultTopPools)
+	points, order, err := analysis.PoolShare(r.Context(), s.DB, p.BucketSize, p.From, p.To, analysis.DefaultTopPools, analysis.DefaultPoolTagMappings)
 	if err != nil {
 		writePNG(w, nil, err, "analysis pool share png")
 		return
@@ -232,4 +289,20 @@ func (s *Server) handleAnalysisDifficultyPNG(w http.ResponseWriter, r *http.Requ
 	}
 	png, err := chartrender.LineChart(points, []string{seriesName}, "Difficulty (avg, hashrate proxy)", "block height", "difficulty")
 	writePNG(w, png, err, "analysis difficulty png")
+}
+
+func (s *Server) handleAnalysisPoolAlgoBreakdownPNG(w http.ResponseWriter, r *http.Request) {
+	p := s.parseAnalysisParams(r)
+	pool := parsePoolAlgoBreakdownPool(r)
+	if pool == "" {
+		writePNG(w, nil, fmt.Errorf("no pool specified"), "analysis pool algo breakdown png")
+		return
+	}
+	points, order, err := analysis.PoolAlgoBreakdown(r.Context(), s.DB, p.BucketSize, p.From, p.To, analysis.DefaultPoolTagMappings, pool)
+	if err != nil {
+		writePNG(w, nil, err, "analysis pool algo breakdown png")
+		return
+	}
+	png, err := chartrender.StackedAreaChart(points, order, "Pool Algo Breakdown: "+pool, "block height", "block count")
+	writePNG(w, png, err, "analysis pool algo breakdown png")
 }

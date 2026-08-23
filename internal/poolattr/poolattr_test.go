@@ -53,7 +53,17 @@ func TestAttribute_KnownTags(t *testing.T) {
 		{"own pool E0", 0, "WUFJagtechE0", "WUFJagtechE0", true, PowAlgoRXM},
 		{"own pool E1", 3, "WUFJagtechE1", "WUFJagtechE1", true, PowAlgoC29},
 		{"own pool S1", 2, "WUFJagtechS1", "WUFJagtechS1", true, PowAlgoRXT},
-		{"own pool with trailing junk", 0, "WUFJagtechE0-worker42", "WUFJagtechE0-worker42", true, PowAlgoRXM},
+		// Real coinbase_extra bytes are always exactly 12 bytes once decoded; anything
+		// after that is non-identifying binary/padding noise from the block, not a
+		// legitimate variable-length worker-ID feature (confirmed via live production
+		// data - see ourPoolTagLen's doc comment). This exercises the truncation itself.
+		{"own pool truncates trailing bytes", 0, "WUFJagtechE0-worker42", "WUFJagtechE0", true, PowAlgoRXM},
+		// Legacy/inactive node-name shape with embedded spaces, matching the real
+		// production byte pattern "WUF  Ahri   " (WUF + 2 spaces + "Ahri" + 3 trailing
+		// spaces = 12 bytes) once printable-filtered.
+		{"own pool legacy Ahri node", 4, "WUF  Ahri   -garbage-tail-bytes", "WUF  Ahri   ", true, PowAlgoSHA3X},
+		// Shorter than ourPoolTagLen must clamp to len(extra), not panic.
+		{"own pool shorter than tag length", 0, "WUFshort", "WUFshort", true, PowAlgoRXM},
 		{"kryptex", 4, "/pool.kryptex.com/", "pool.kryptex.com", false, PowAlgoSHA3X},
 		{"H9", 4, "H9.com.some-worker-id", "H9.com", false, PowAlgoSHA3X},
 		{"LuckyPool", 4, "LuckyPool", "LuckyPool", false, PowAlgoSHA3X},
