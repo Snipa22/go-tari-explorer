@@ -214,23 +214,47 @@ func BlockTime(ctx context.Context, database *db.DB, bucketSize, fromHeight, toH
 	return points, summary, nil
 }
 
-// DifficultyOrder is the single-series name used for the difficulty chart.
-const difficultySeriesName = "avg difficulty"
-
-// Difficulty loads db.DifficultyBucketAvg for [fromHeight, toHeight] and reshapes it into
-// chartrender.Points (one per bucket, single "avg difficulty" series) for
-// chartrender.LineChart. See db.DifficultyBucketRow's doc comment for why this is a
+// Difficulty loads db.DifficultyBucketAvg for [fromHeight, toHeight] and reshapes it
+// into chartrender.Points (one per bucket, one Series entry per pow-algo) ready for
+// chartrender.LineChart, plus the series order/name list to pass alongside it - the
+// same 4-series RXM/RXT/C29/SHA3X shape as AlgoDistribution, reusing AlgoOrder as the
+// returned order rather than a separate constant. See db.DifficultyBucketRow's doc
+// comment for why per-algo (not blended) is the correct shape, and for why this is a
 // difficulty chart rather than a literal hashrate chart.
-func Difficulty(ctx context.Context, database *db.DB, bucketSize, fromHeight, toHeight uint64) ([]chartrender.Point, string, error) {
+//
+// A bucket row's RXM/RXT/C29/SHA3X field is nil when that algo had zero blocks in that
+// bucket (see db.DifficultyBucketRow); such a field is omitted entirely from the
+// Point's Series map below rather than inserted as 0.0, so "no data" is never
+// misrepresented as "the average difficulty is exactly zero" (never a valid real
+// value). Note this omission only prevents the correctness bug at this layer: today,
+// chartrender.LineChart has no gap/NaN-skip rendering, so seriesValues' "missing key
+// treated as 0" fallback (see internal/chartrender's doc comment) still means a
+// zero-block bucket renders as a visible dip to 0 on that algo's line rather than a
+// true gap. Teaching chartrender to render a gap instead of a 0 for a missing series
+// value is a real, separate enhancement, out of scope for this fix.
+func Difficulty(ctx context.Context, database *db.DB, bucketSize, fromHeight, toHeight uint64) ([]chartrender.Point, []string, error) {
 	rows, err := database.DifficultyBucketAvg(ctx, bucketSize, fromHeight, toHeight)
 	if err != nil {
-		return nil, "", fmt.Errorf("analysis: difficulty: %w", err)
+		return nil, nil, fmt.Errorf("analysis: difficulty: %w", err)
 	}
 	points := make([]chartrender.Point, len(rows))
 	for i, r := range rows {
-		points[i] = chartrender.Point{X: float64(r.BucketStart), Series: map[string]float64{difficultySeriesName: r.AvgDifficulty}}
+		series := map[string]float64{}
+		if r.RXM != nil {
+			series["RXM"] = *r.RXM
+		}
+		if r.RXT != nil {
+			series["RXT"] = *r.RXT
+		}
+		if r.C29 != nil {
+			series["C29"] = *r.C29
+		}
+		if r.SHA3X != nil {
+			series["SHA3X"] = *r.SHA3X
+		}
+		points[i] = chartrender.Point{X: float64(r.BucketStart), Series: series}
 	}
-	return points, difficultySeriesName, nil
+	return points, AlgoOrder, nil
 }
 
 // PoolAlgoBreakdown loads db.AlgoBucketCountsForPool for [fromHeight, toHeight], scoped

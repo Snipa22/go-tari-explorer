@@ -300,14 +300,25 @@ func (s *Server) handleAnalysisBlockTimePNG(w http.ResponseWriter, r *http.Reque
 	writePNG(w, png, err, "analysis block time png")
 }
 
+// handleAnalysisDifficultyPNG renders the difficulty chart as 4 separate overlaid lines
+// (chartrender.LineChart), one per pow_algo, rather than a chartrender.StackedAreaChart
+// like AlgoDistribution/PoolShare/PoolAlgoBreakdown use. Those other views correctly
+// stack, because summing block COUNTS across algos gives a real, meaningful total block
+// count. Difficulty is not meaningfully additive the same way: RXM/RXT/C29/SHA3X
+// difficulties differ by orders of magnitude and measure entirely different,
+// non-comparable proof-of-work spaces, so summing them on top of each other would
+// produce a number with no real-world interpretation, and would visually crush the
+// smaller-magnitude algo's line into an unreadable sliver near the bottom of the stack.
+// 4 independent lines, each readable at its own natural scale, is the only correct
+// representation here.
 func (s *Server) handleAnalysisDifficultyPNG(w http.ResponseWriter, r *http.Request) {
 	p := s.parseAnalysisParams(r)
-	points, seriesName, err := analysis.Difficulty(r.Context(), s.DB, p.BucketSize, p.From, p.To)
+	points, order, err := analysis.Difficulty(r.Context(), s.DB, p.BucketSize, p.From, p.To)
 	if err != nil {
 		writePNG(w, nil, err, "analysis difficulty png")
 		return
 	}
-	png, err := chartrender.LineChart(points, []string{seriesName}, "Difficulty (avg, hashrate proxy)", "block height", "difficulty")
+	png, err := chartrender.LineChart(points, order, "Difficulty (avg per algo, hashrate proxy)", "block height", "difficulty")
 	writePNG(w, png, err, "analysis difficulty png")
 }
 
