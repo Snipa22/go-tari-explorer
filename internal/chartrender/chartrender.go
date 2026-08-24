@@ -186,6 +186,17 @@ func notEnoughDataPNG(title string) ([]byte, error) {
 	return buf.Bytes(), nil
 }
 
+// NotEnoughDataPNG is the exported form of notEnoughDataPNG, for callers that need to
+// render this package's "not enough data" placeholder directly for a caller-specific
+// "no data" condition that isn't expressible via StackedAreaChart/LineChart's own
+// <2-distinct-X guard - e.g. internal/server's per-algo difficulty PNG handler, which
+// needs this placeholder when one particular algo has zero data across the entire
+// requested height range even though the overall multi-algo bucket set has plenty of
+// distinct X values (so LineChart's own guard never fires for that case).
+func NotEnoughDataPNG(title string) ([]byte, error) {
+	return notEnoughDataPNG(title)
+}
+
 // basicFontFace is the fixed-width bitmap face used for all placeholder-PNG text -
 // golang.org/x/image/font/basicfont is already an indirect dependency of this module
 // (pulled in transitively via go-chart's font handling), so this adds no new
