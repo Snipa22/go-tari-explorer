@@ -1075,34 +1075,35 @@ type PoolCountRow struct {
 }
 
 // AlgoCountRow is one row of the "how many of the most recent N blocks were mined on
-// each pow-algo" breakdown - see RecentBlocksStats.
+// each pow-algo" breakdown - see RecentBlocksStats. AvgDifficulty is the mean
+// `difficulty` column value over just this algo's blocks within that same sample.
 type AlgoCountRow struct {
-	Algo  string
-	Count int64
+	Algo          string
+	Count         int64
+	AvgDifficulty float64
 }
 
 // RecentBlocksStats is the front-page "at a glance" snapshot over the most recently
-// indexed limit blocks (by height descending): a pool-tag breakdown, a pow-algo
-// breakdown, and the average difficulty over that same sample. SampleCount is how many
-// blocks actually contributed (== limit once at least that many blocks are indexed,
-// less before then, 0 on an empty table).
+// indexed limit blocks (by height descending): a pool-tag breakdown and a pow-algo
+// breakdown (the latter including a per-algo average difficulty, see AlgoCountRow).
+// SampleCount is how many blocks actually contributed (== limit once at least that
+// many blocks are indexed, less before then, 0 on an empty table).
 type RecentBlocksStats struct {
-	Pools         []PoolCountRow
-	Algos         []AlgoCountRow
-	AvgDifficulty float64
-	SampleCount   int64
+	Pools       []PoolCountRow
+	Algos       []AlgoCountRow
+	SampleCount int64
 }
 
-// RecentBlocksStats computes the front-page pool/algo breakdown and average difficulty
-// over the most recently indexed `limit` blocks (ORDER BY height DESC LIMIT limit), in
-// a single round trip to Postgres: one CTE selects the candidate blocks (with pool_tag
-// folded through mappings, the same LIKE-prefix mechanism PoolShareBucketCounts uses -
-// see PoolTagMapping's doc comment), three more CTEs aggregate that same sample three
-// different ways (per-pool count, per-algo count, overall avg difficulty + sample
-// count), and the results are UNION ALL'd together with a `kind` discriminator column
-// so the three different-shaped aggregates can travel back as one result set rather
-// than three separate queries. All aggregation happens Postgres-side; raw block rows
-// are never pulled into Go. limit must be > 0.
+// RecentBlocksStats computes the front-page pool/algo breakdown over the most recently
+// indexed `limit` blocks (ORDER BY height DESC LIMIT limit), in a single round trip to
+// Postgres: one CTE selects the candidate blocks (with pool_tag folded through
+// mappings, the same LIKE-prefix mechanism PoolShareBucketCounts uses - see
+// PoolTagMapping's doc comment), three more CTEs aggregate that same sample three
+// different ways (per-pool count, per-algo count + per-algo avg difficulty, and the
+// overall sample size), and the results are UNION ALL'd together with a `kind`
+// discriminator column so the three different-shaped aggregates can travel back as one
+// result set rather than three separate queries. All aggregation happens
+// Postgres-side; raw block rows are never pulled into Go. limit must be > 0.
 func (d *DB) RecentBlocksStats(ctx context.Context, limit int, mappings []PoolTagMapping) (RecentBlocksStats, error) {
 	if limit <= 0 {
 		return RecentBlocksStats{}, fmt.Errorf("db: recent blocks stats: limit must be > 0")
@@ -1140,19 +1141,19 @@ func (d *DB) RecentBlocksStats(ctx context.Context, limit int, mappings []PoolTa
 			GROUP BY mapped_pool
 		),
 		algo_counts AS (
-			SELECT 'algo' AS kind, pow_algo AS key, COUNT(*) AS cnt, NULL::float8 AS avg_diff
+			SELECT 'algo' AS kind, pow_algo AS key, COUNT(*) AS cnt, AVG(difficulty) AS avg_diff
 			FROM recent
 			GROUP BY pow_algo
 		),
-		diff_avg AS (
-			SELECT 'difficulty' AS kind, 'avg' AS key, COUNT(*) AS cnt, AVG(difficulty) AS avg_diff
+		sample_size AS (
+			SELECT 'sample' AS kind, 'n' AS key, COUNT(*) AS cnt, NULL::float8 AS avg_diff
 			FROM recent
 		)
 		SELECT kind, key, cnt, avg_diff FROM pool_counts
 		UNION ALL
 		SELECT kind, key, cnt, avg_diff FROM algo_counts
 		UNION ALL
-		SELECT kind, key, cnt, avg_diff FROM diff_avg
+		SELECT kind, key, cnt, avg_diff FROM sample_size
 		ORDER BY kind, cnt DESC
 	`, caseClauses.String())
 
@@ -1174,12 +1175,13 @@ func (d *DB) RecentBlocksStats(ctx context.Context, limit int, mappings []PoolTa
 		case "pool":
 			out.Pools = append(out.Pools, PoolCountRow{PoolTag: key, Count: cnt})
 		case "algo":
-			out.Algos = append(out.Algos, AlgoCountRow{Algo: key, Count: cnt})
-		case "difficulty":
-			out.SampleCount = cnt
+			var ad float64
 			if avgDiff != nil {
-				out.AvgDifficulty = *avgDiff
+				ad = *avgDiff
 			}
+			out.Algos = append(out.Algos, AlgoCountRow{Algo: key, Count: cnt, AvgDifficulty: ad})
+		case "sample":
+			out.SampleCount = cnt
 		}
 	}
 	return out, rows.Err()

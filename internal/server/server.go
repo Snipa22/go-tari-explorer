@@ -224,15 +224,30 @@ func toBlockViews(blocks []db.Block) []blockView {
 	return out
 }
 
-// recentBlocksStatsView adapts db.RecentBlocksStats for template rendering
-// (human-friendly average-difficulty formatting) - see db.RecentBlocksStats and
-// handleBlocksList below.
+// recentBlocksStatsView adapts db.RecentBlocksStats for template rendering - see
+// db.RecentBlocksStats and handleBlocksList below.
 type recentBlocksStatsView struct {
 	db.RecentBlocksStats
 }
 
+// Algos returns the embedded per-algo breakdown wrapped in algoCountRowView so the
+// template can call AvgDifficultyDisplay per row.
+func (v recentBlocksStatsView) Algos() []algoCountRowView {
+	out := make([]algoCountRowView, len(v.RecentBlocksStats.Algos))
+	for i, a := range v.RecentBlocksStats.Algos {
+		out[i] = algoCountRowView{a}
+	}
+	return out
+}
+
+// algoCountRowView adapts db.AlgoCountRow for template rendering (human-friendly
+// average-difficulty formatting) - see db.AlgoCountRow.
+type algoCountRowView struct {
+	db.AlgoCountRow
+}
+
 // AvgDifficultyDisplay formats AvgDifficulty with 2 decimal places.
-func (v recentBlocksStatsView) AvgDifficultyDisplay() string {
+func (v algoCountRowView) AvgDifficultyDisplay() string {
 	return strconv.FormatFloat(v.AvgDifficulty, 'f', 2, 64)
 }
 

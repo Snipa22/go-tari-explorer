@@ -19,7 +19,7 @@
         <p style="color:#ff8080;">{{.RecentStatsError}}</p>
         {{else}}
         {{range .RecentStats.Algos}}
-        <div class="stat-card"><div class="label">{{.Algo}}</div><div class="value">{{.Count}}</div></div>
+        <div class="stat-card"><div class="label">{{.Algo}}</div><div class="value">{{.Count}} blocks, avg difficulty {{.AvgDifficultyDisplay}}</div></div>
         {{end}}
         {{end}}
     </div>
