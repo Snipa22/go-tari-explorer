@@ -2,38 +2,60 @@
 <h2>Blocks</h2>
 
 <h3>At a Glance &mdash; Last {{.RecentStats.SampleCount}} Blocks</h3>
-<div class="stat-columns">
-    <div class="stat-column">
-        <h4>Pool - Blocks</h4>
-        {{if .RecentStatsError}}
-        <p style="color:#ff8080;">{{.RecentStatsError}}</p>
-        {{else}}
-        {{range .RecentStats.Pools}}
-        <div class="stat-card"><div class="label">{{.PoolTag}}</div><div class="value">{{.Count}}</div></div>
-        {{end}}
-        {{end}}
+
+<div class="glance-row">
+    {{if .RecentStatsError}}
+    <p style="color:#ff8080;">{{.RecentStatsError}}</p>
+    {{else}}
+    <div class="glance-pool-split">
+        <table class="glance-table">
+            <thead><tr><th>Pool</th><th>Blocks</th></tr></thead>
+            <tbody>
+            {{$toggle := true}}
+            {{range .RecentStats.Pools}}
+            {{if $toggle}}
+            <tr><td>{{.PoolTag}}</td><td>{{.Count}}</td></tr>
+            {{end}}
+            {{$toggle = not $toggle}}
+            {{end}}
+            </tbody>
+        </table>
+        <table class="glance-table">
+            <thead><tr><th>Pool</th><th>Blocks</th></tr></thead>
+            <tbody>
+            {{$toggle := true}}
+            {{range .RecentStats.Pools}}
+            {{if not $toggle}}
+            <tr><td>{{.PoolTag}}</td><td>{{.Count}}</td></tr>
+            {{end}}
+            {{$toggle = not $toggle}}
+            {{end}}
+            </tbody>
+        </table>
     </div>
-    <div class="stat-column">
-        <h4>Algo - Blocks</h4>
-        {{if .RecentStatsError}}
-        <p style="color:#ff8080;">{{.RecentStatsError}}</p>
-        {{else}}
+    <table class="glance-table">
+        <thead><tr><th>Algo</th><th>Blocks</th><th>Diff</th></tr></thead>
+        <tbody>
         {{range .RecentStats.Algos}}
-        <div class="stat-card"><div class="label">{{.Algo}}</div><div class="value">{{.Count}} blocks, avg difficulty {{.AvgDifficultyDisplay}}</div></div>
+        <tr><td>{{.Algo}}</td><td>{{.Count}}</td><td>{{.AvgDifficultyDisplay}}</td></tr>
         {{end}}
-        {{end}}
-    </div>
-    <div class="stat-column">
-        <h4>Mempool</h4>
-        {{if .MempoolStatsError}}
-        <p style="color:#ff8080;">{{.MempoolStatsError}}</p>
-        {{else}}
-        <div class="stat-card"><div class="label">Unconfirmed Txs</div><div class="value">{{.MempoolStats.UnconfirmedTxs}}</div></div>
-        <div class="stat-card"><div class="label">Reorg Txs</div><div class="value">{{.MempoolStats.ReorgTxs}}</div></div>
-        <div class="stat-card"><div class="label">Unconfirmed Weight</div><div class="value">{{.MempoolStats.UnconfirmedWeight}}</div></div>
-        {{end}}
-        <p><a href="/mempool">Mempool details &raquo;</a></p>
-    </div>
+        </tbody>
+    </table>
+    {{end}}
+</div>
+
+<div class="glance-row">
+    {{if .MempoolStatsError}}
+    <p style="color:#ff8080;">{{.MempoolStatsError}}</p>
+    {{else}}
+    <table class="glance-table">
+        <thead><tr><th>Unconfirmed</th><th>Reorg</th><th>Weight</th></tr></thead>
+        <tbody>
+        <tr><td>{{.MempoolStats.UnconfirmedTxs}}</td><td>{{.MempoolStats.ReorgTxs}}</td><td>{{.MempoolStats.UnconfirmedWeight}}</td></tr>
+        </tbody>
+    </table>
+    {{end}}
+    <p><a href="/mempool">Mempool details &raquo;</a></p>
 </div>
 
 <table>
