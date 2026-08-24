@@ -281,3 +281,45 @@ func (c *Client) TransactionState(ctx context.Context, excessSig *tari_generated
 		return client.TransactionState(ctx, &tari_generated.TransactionStateRequest{ExcessSig: excessSig})
 	})
 }
+
+// GetMempoolTransactions drains the base node's live GetMempoolTransactions stream and
+// returns every currently-pending transaction as a slice, with failover across
+// configured hosts. GetMempoolTransactionsRequest carries no cursor/limit/offset
+// fields - there is no pagination on this RPC (a known Tari protocol limitation) - so
+// the entire current mempool is always returned in one call; a caller polling this on
+// an interval should be mindful that a very large mempool means a correspondingly large
+// response every tick. This is always a live call, like SearchKernels/SearchUtxos
+// above: nothing about mempool contents is persisted or answerable from this repo's
+// Postgres index.
+func (c *Client) GetMempoolTransactions(ctx context.Context) ([]*tari_generated.Transaction, error) {
+	return withFailover(c, ctx, func(ctx context.Context, client tari_generated.BaseNodeClient) ([]*tari_generated.Transaction, error) {
+		stream, err := client.GetMempoolTransactions(ctx, &tari_generated.GetMempoolTransactionsRequest{})
+		if err != nil {
+			return nil, err
+		}
+		var out []*tari_generated.Transaction
+		for {
+			resp, err := stream.Recv()
+			if err != nil {
+				if err == io.EOF {
+					return out, nil
+				}
+				return nil, err
+			}
+			out = append(out, resp.GetTransaction())
+		}
+	})
+}
+
+// GetMempoolStats returns the base node's current aggregate mempool statistics -
+// unconfirmed transaction count, reorg transaction count, and total unconfirmed
+// weight - with failover across configured hosts. Unlike GetMempoolTransactions above,
+// this is a single unary call: the base node computes the aggregate server-side rather
+// than requiring the caller to drain and sum the full transaction stream, which is why
+// this is the RPC internal/mempoolpoller polls on an interval rather than
+// GetMempoolTransactions.
+func (c *Client) GetMempoolStats(ctx context.Context) (*tari_generated.MempoolStatsResponse, error) {
+	return withFailover(c, ctx, func(ctx context.Context, client tari_generated.BaseNodeClient) (*tari_generated.MempoolStatsResponse, error) {
+		return client.GetMempoolStats(ctx, &tari_generated.Empty{})
+	})
+}

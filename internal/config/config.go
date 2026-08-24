@@ -7,6 +7,7 @@ package config
 import (
 	"os"
 	"strings"
+	"time"
 )
 
 const (
@@ -74,4 +75,25 @@ func PoolStatsBaseURL() string {
 		return v
 	}
 	return DefaultPoolStatsBaseURL
+}
+
+// DefaultMempoolPollInterval is how often cmd/mempool-poller polls the base node's
+// live GetMempoolStats RPC absent an override, matching cmd/indexer's own
+// 30-second -poll-interval default for its "follow" mode. Override with
+// TARI_EXPLORER_MEMPOOL_POLL_INTERVAL (a time.ParseDuration string, e.g. "45s") or the
+// -poll-interval flag.
+const DefaultMempoolPollInterval = 30 * time.Second
+
+// MempoolPollInterval returns TARI_EXPLORER_MEMPOOL_POLL_INTERVAL parsed as a
+// time.Duration if set to a valid duration string, else DefaultMempoolPollInterval. An
+// unparseable value is treated the same as unset (falls back to the default) rather
+// than failing startup outright - not worth taking a config typo down a whole process
+// for a poll-interval knob that already has a sane default.
+func MempoolPollInterval() time.Duration {
+	if v := os.Getenv("TARI_EXPLORER_MEMPOOL_POLL_INTERVAL"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil {
+			return d
+		}
+	}
+	return DefaultMempoolPollInterval
 }

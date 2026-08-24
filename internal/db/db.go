@@ -15,6 +15,7 @@ import (
 	"io/fs"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -944,6 +945,66 @@ func (d *DB) DifficultyBucketAvg(ctx context.Context, bucketSize uint64, fromHei
 		}
 		r.BucketEnd = r.BucketStart + bucketSize - 1
 		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
+// MempoolSnapshot is the row shape for the `mempool_snapshots` table: one row per poll
+// tick of the base node's live aggregate mempool stats (see
+// tari_generated.MempoolStatsResponse / internal/nodeclient.Client.GetMempoolStats),
+// taken by cmd/mempool-poller's Poller (internal/mempoolpoller.Poller). This is an
+// aggregate-only snapshot - one row summarizes the *entire* mempool at SnapshotTime -
+// not one row per pending transaction; see migrations/0006_mempool_snapshots.up.sql for
+// why per-transaction mempool detail is never persisted anywhere in this schema.
+type MempoolSnapshot struct {
+	ID                int64
+	SnapshotTime      time.Time
+	UnconfirmedTxs    int32
+	ReorgTxs          int32
+	UnconfirmedWeight int64
+}
+
+// InsertMempoolSnapshot inserts one new mempool_snapshots row. Unlike UpsertBlock, this
+// is a plain INSERT with no ON CONFLICT/upsert-on-key: every poll tick is a distinct
+// point-in-time observation with no natural key to upsert against, and duplicate or
+// out-of-order snapshot_time values across ticks are expected and fine (analysis
+// queries group by time range, not by a unique identity - see
+// migrations/0006_mempool_snapshots.up.sql).
+func (d *DB) InsertMempoolSnapshot(ctx context.Context, s MempoolSnapshot) error {
+	_, err := d.Pool.Exec(ctx, `
+		INSERT INTO mempool_snapshots (snapshot_time, unconfirmed_txs, reorg_txs, unconfirmed_weight)
+		VALUES ($1, $2, $3, $4)
+	`, s.SnapshotTime, s.UnconfirmedTxs, s.ReorgTxs, s.UnconfirmedWeight)
+	if err != nil {
+		return fmt.Errorf("db: insert mempool snapshot: %w", err)
+	}
+	return nil
+}
+
+// ListMempoolSnapshots returns mempool_snapshots rows ordered by snapshot_time
+// ascending, optionally bounded to snapshot_time in [from, to] (inclusive on both
+// ends). Either bound may be nil to leave that side unbounded - from == nil && to ==
+// nil returns every stored snapshot.
+func (d *DB) ListMempoolSnapshots(ctx context.Context, from, to *time.Time) ([]MempoolSnapshot, error) {
+	rows, err := d.Pool.Query(ctx, `
+		SELECT id, snapshot_time, unconfirmed_txs, reorg_txs, unconfirmed_weight
+		FROM mempool_snapshots
+		WHERE ($1::timestamptz IS NULL OR snapshot_time >= $1)
+		  AND ($2::timestamptz IS NULL OR snapshot_time <= $2)
+		ORDER BY snapshot_time ASC
+	`, from, to)
+	if err != nil {
+		return nil, fmt.Errorf("db: list mempool snapshots: %w", err)
+	}
+	defer rows.Close()
+
+	var out []MempoolSnapshot
+	for rows.Next() {
+		var s MempoolSnapshot
+		if err := rows.Scan(&s.ID, &s.SnapshotTime, &s.UnconfirmedTxs, &s.ReorgTxs, &s.UnconfirmedWeight); err != nil {
+			return nil, fmt.Errorf("db: list mempool snapshots: scan: %w", err)
+		}
+		out = append(out, s)
 	}
 	return out, rows.Err()
 }
