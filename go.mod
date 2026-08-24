@@ -1,6 +1,6 @@
 module github.com/Snipa22/go-tari-explorer
 
-go 1.24
+go 1.24.0
 
 require (
 	github.com/Snipa22/go-tari-grpc-lib/v3 v3.2.0
@@ -20,6 +20,7 @@ require (
 	golang.org/x/sync v0.13.0 // indirect
 	golang.org/x/sys v0.32.0 // indirect
 	golang.org/x/text v0.24.0 // indirect
+	golang.org/x/time v0.13.0 // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20250218202821-56aae31c358a // indirect
 	google.golang.org/protobuf v1.36.6 // indirect
 )
