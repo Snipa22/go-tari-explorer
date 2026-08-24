@@ -396,10 +396,6 @@ func TestRecentBlocksStats(t *testing.T) {
 	if got.SampleCount != 5 {
 		t.Fatalf("expected sample count 5, got %d", got.SampleCount)
 	}
-	wantAvgDiff := (100.0 + 200.0 + 300.0 + 400.0 + 500.0) / 5.0
-	if got.AvgDifficulty != wantAvgDiff {
-		t.Errorf("expected avg difficulty %v, got %v", wantAvgDiff, got.AvgDifficulty)
-	}
 
 	poolCounts := map[string]int64{}
 	for _, p := range got.Pools {
@@ -416,11 +412,60 @@ func TestRecentBlocksStats(t *testing.T) {
 	}
 
 	algoCounts := map[string]int64{}
+	algoAvgDiff := map[string]float64{}
 	for _, a := range got.Algos {
 		algoCounts[a.Algo] = a.Count
+		algoAvgDiff[a.Algo] = a.AvgDifficulty
 	}
 	if algoCounts["RXM"] != 2 || algoCounts["SHA3X"] != 2 || algoCounts["RXT"] != 1 {
 		t.Errorf("unexpected algo breakdown: %+v", got.Algos)
+	}
+	if algoAvgDiff["RXM"] != 150.0 {
+		t.Errorf("expected RXM avg difficulty 150.0, got %v", algoAvgDiff["RXM"])
+	}
+	if algoAvgDiff["SHA3X"] != 350.0 {
+		t.Errorf("expected SHA3X avg difficulty 350.0, got %v", algoAvgDiff["SHA3X"])
+	}
+	if algoAvgDiff["RXT"] != 500.0 {
+		t.Errorf("expected RXT avg difficulty 500.0, got %v", algoAvgDiff["RXT"])
+	}
+}
+
+// TestRecentBlocksStats_PerAlgoAvgDifficultyDistinct is the core regression test for
+// per-algo average difficulty: it seeds two algos with deliberately very different
+// difficulty magnitudes so that an (incorrect) single global average across all blocks
+// would be nowhere near either algo's true average, making a regression to the old
+// global-blob behavior unmistakable.
+func TestRecentBlocksStats_PerAlgoAvgDifficultyDistinct(t *testing.T) {
+	d := openTestDB(t)
+	ctx := context.Background()
+
+	// RXM: 1000, 2000, 3000 -> avg 2000.
+	seedBlockFull(t, d, 900, "RXM", nil, 1000)
+	seedBlockFull(t, d, 901, "RXM", nil, 2000)
+	seedBlockFull(t, d, 902, "RXM", nil, 3000)
+	// SHA3X: 10, 20, 30 -> avg 20.
+	seedBlockFull(t, d, 903, "SHA3X", nil, 10)
+	seedBlockFull(t, d, 904, "SHA3X", nil, 20)
+	seedBlockFull(t, d, 905, "SHA3X", nil, 30)
+
+	got, err := d.RecentBlocksStats(ctx, 100, nil)
+	if err != nil {
+		t.Fatalf("RecentBlocksStats: %v", err)
+	}
+	if got.SampleCount != 6 {
+		t.Fatalf("expected sample count 6, got %d", got.SampleCount)
+	}
+
+	algoAvgDiff := map[string]float64{}
+	for _, a := range got.Algos {
+		algoAvgDiff[a.Algo] = a.AvgDifficulty
+	}
+	if algoAvgDiff["RXM"] != 2000.0 {
+		t.Errorf("expected RXM avg difficulty 2000.0, got %v", algoAvgDiff["RXM"])
+	}
+	if algoAvgDiff["SHA3X"] != 20.0 {
+		t.Errorf("expected SHA3X avg difficulty 20.0, got %v", algoAvgDiff["SHA3X"])
 	}
 }
 
@@ -455,7 +500,7 @@ func TestRecentBlocksStats_EmptyTable(t *testing.T) {
 	if err != nil {
 		t.Fatalf("RecentBlocksStats: %v", err)
 	}
-	if got.SampleCount != 0 || len(got.Pools) != 0 || len(got.Algos) != 0 || got.AvgDifficulty != 0 {
+	if got.SampleCount != 0 || len(got.Pools) != 0 || len(got.Algos) != 0 {
 		t.Fatalf("expected zero-value stats on empty table, got %+v", got)
 	}
 }
