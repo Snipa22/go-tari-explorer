@@ -92,11 +92,14 @@ type analysisViewData struct {
 	Error      string
 	Summary    *blockTimeSummaryView
 	Difficulty bool
-	// PoolField/Pool are set only by the pool-algo-breakdown view, which needs an
-	// extra "pool" query param the other 4 analysis views don't have. Zero value
-	// (PoolField == false) hides the extra form field for every other view.
-	PoolField bool
-	Pool      string
+	// PoolField/Pool/PoolOptions are set only by the pool-algo-breakdown view, which
+	// needs an extra "pool" query param the other 4 analysis views don't have. Zero
+	// value (PoolField == false) hides the extra form field for every other view.
+	// PoolOptions is the data-driven dropdown choice list built by
+	// analysis.PoolOptions - see handleAnalysisPoolAlgoBreakdown.
+	PoolField   bool
+	Pool        string
+	PoolOptions []string
 }
 
 // blockTimeSummaryView adapts db.BlockTimeSummaryRow for template rendering, pre-
@@ -134,6 +137,9 @@ func newBlockTimeSummaryView(r db.BlockTimeSummaryRow) blockTimeSummaryView {
 func (s *Server) handleAnalysisAlgoDistribution(w http.ResponseWriter, r *http.Request) {
 	p := s.parseAnalysisParams(r)
 	data := analysisViewData{Title: "Algo Distribution", ImgSrc: imgSrc("/analysis/algo-distribution.png", p), Params: p}
+	// tooFewBucketsForChart is intentionally not checked here: that shape is not an
+	// error (the .png endpoint renders a graceful placeholder for it - see
+	// tooFewBucketsForChart's doc comment), so the HTML page renders normally too.
 	if _, _, err := analysis.AlgoDistribution(r.Context(), s.DB, p.BucketSize, p.From, p.To); err != nil {
 		log.Printf("server: analysis algo distribution: %v", err)
 		data.Error = "unable to load chart data"
@@ -146,6 +152,7 @@ func (s *Server) handleAnalysisAlgoDistribution(w http.ResponseWriter, r *http.R
 func (s *Server) handleAnalysisPoolShare(w http.ResponseWriter, r *http.Request) {
 	p := s.parseAnalysisParams(r)
 	data := analysisViewData{Title: "Pool Share", ImgSrc: imgSrc("/analysis/pool-share.png", p), Params: p}
+	// See handleAnalysisAlgoDistribution's comment above re: tooFewBucketsForChart.
 	if _, _, err := analysis.PoolShare(r.Context(), s.DB, p.BucketSize, p.From, p.To, analysis.DefaultTopPools, analysis.DefaultPoolTagMappings); err != nil {
 		log.Printf("server: analysis pool share: %v", err)
 		data.Error = "unable to load chart data"
@@ -158,6 +165,7 @@ func (s *Server) handleAnalysisPoolShare(w http.ResponseWriter, r *http.Request)
 func (s *Server) handleAnalysisBlockTime(w http.ResponseWriter, r *http.Request) {
 	p := s.parseAnalysisParams(r)
 	data := analysisViewData{Title: "Block Time", ImgSrc: imgSrc("/analysis/block-time.png", p), Params: p}
+	// See handleAnalysisAlgoDistribution's comment above re: tooFewBucketsForChart.
 	_, summary, err := analysis.BlockTime(r.Context(), s.DB, p.BucketSize, p.From, p.To)
 	if err != nil {
 		log.Printf("server: analysis block time: %v", err)
@@ -174,6 +182,7 @@ func (s *Server) handleAnalysisBlockTime(w http.ResponseWriter, r *http.Request)
 func (s *Server) handleAnalysisDifficulty(w http.ResponseWriter, r *http.Request) {
 	p := s.parseAnalysisParams(r)
 	data := analysisViewData{Title: "Difficulty", ImgSrc: imgSrc("/analysis/difficulty.png", p), Params: p, Difficulty: true}
+	// See handleAnalysisAlgoDistribution's comment above re: tooFewBucketsForChart.
 	if _, _, err := analysis.Difficulty(r.Context(), s.DB, p.BucketSize, p.From, p.To); err != nil {
 		log.Printf("server: analysis difficulty: %v", err)
 		data.Error = "unable to load chart data"
@@ -216,16 +225,27 @@ func parsePoolAlgoBreakdownPool(r *http.Request) string {
 func (s *Server) handleAnalysisPoolAlgoBreakdown(w http.ResponseWriter, r *http.Request) {
 	p := s.parseAnalysisParams(r)
 	pool := parsePoolAlgoBreakdownPool(r)
+	poolOptions, err := analysis.PoolOptions(r.Context(), s.DB, analysis.DefaultPoolTagMappings)
+	if err != nil {
+		log.Printf("server: analysis pool algo breakdown: pool options: %v", err)
+	}
 	data := analysisViewData{
-		Title:     "Pool Algo Breakdown",
-		ImgSrc:    poolAlgoBreakdownImgSrc("/analysis/pool-algo-breakdown.png", pool, p),
-		Params:    p,
-		PoolField: true,
-		Pool:      pool,
+		Title:       "Pool Algo Breakdown",
+		ImgSrc:      poolAlgoBreakdownImgSrc("/analysis/pool-algo-breakdown.png", pool, p),
+		Params:      p,
+		PoolField:   true,
+		Pool:        pool,
+		PoolOptions: poolOptions,
 	}
 	if pool == "" {
 		data.Error = "no pool specified and no default pool tag mapping configured"
 	} else if _, _, err := analysis.PoolAlgoBreakdown(r.Context(), s.DB, p.BucketSize, p.From, p.To, analysis.DefaultPoolTagMappings, pool); err != nil {
+		// Note: a too-few-buckets result (bucket_size/from/to collapsing the range)
+		// is not an error here - analysis.PoolAlgoBreakdown only returns err on a
+		// real underlying query failure. The .png endpoint below renders a graceful
+		// placeholder for the too-few-buckets shape instead of erroring (see
+		// internal/chartrender's doc comments), so this page renders normally
+		// (placeholder image and all) for that case without any special-casing here.
 		log.Printf("server: analysis pool algo breakdown: %v", err)
 		data.Error = "unable to load chart data"
 	}

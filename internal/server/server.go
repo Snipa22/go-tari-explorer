@@ -147,7 +147,13 @@ func New(database *db.DB, poolStatsProvider poolstats.PoolStatsProvider, poolSta
 		txStateTmpl:        txStateTmpl,
 		mempoolTmpl:        mempoolTmpl,
 		mempoolHistoryTmpl: mempoolHistoryTmpl,
-		searchRateLimiter:  newIPRateLimiter(defaultRateLimitPerSecond, defaultRateLimitBurst),
+		// One rate limiter shared by /search, /tx-state, /mempool, /mempool/history,
+		// and / - all of them trigger the same kind of live GRPC call out to the
+		// base node (or, for /, a Postgres query plus that same live call for its
+		// mempool-stats panel), so they share one per-IP budget rather than each
+		// getting their own independent allowance (which would multiply the
+		// effective GRPC-call rate a single IP could sustain).
+		searchRateLimiter: newIPRateLimiter(defaultRateLimitPerSecond, defaultRateLimitBurst),
 	}, nil
 }
 

@@ -794,6 +794,59 @@ func (d *DB) AlgoBucketCountsForPool(ctx context.Context, bucketSize uint64, fro
 	return out, rows.Err()
 }
 
+// UnmappedPoolTags returns every distinct non-NULL pool_tag value currently stored in
+// `blocks` that does not match any entry in mappings' MatchPrefix (i.e. does not
+// satisfy `pool_tag LIKE MatchPrefix || '%'` for any mapping entry - see
+// PoolTagMapping's doc comment). These are pool operators whose blocks haven't (yet,
+// or may never need to) be folded into a canonical mapping entry, and are exactly as
+// valid a literal ?pool= value to AlgoBucketCountsForPool as any CanonicalName (see
+// that method's doc comment on its literal-exact-match fallback for a canonicalName
+// absent from mappings). Results are ordered alphabetically; NULL pool_tag (unattributed
+// blocks) is never included, since it isn't a real pool tag. mappings may be nil/empty,
+// in which case every distinct non-NULL pool_tag is returned.
+//
+// As with AlgoBucketCounts/PoolShareBucketCounts/AlgoBucketCountsForPool above, the
+// prefix exclusion is expressed as one dynamically-built `NOT LIKE` clause per mapping
+// entry (ANDed together) rather than pulling every distinct pool_tag into Go to filter
+// there, for consistency with how those methods already build their WHERE/CASE clauses
+// from a []PoolTagMapping.
+func (d *DB) UnmappedPoolTags(ctx context.Context, mappings []PoolTagMapping) ([]string, error) {
+	var args []interface{}
+	var clauses []string
+	for _, m := range mappings {
+		args = append(args, m.MatchPrefix+"%")
+		clauses = append(clauses, fmt.Sprintf("pool_tag NOT LIKE $%d", len(args)))
+	}
+
+	where := "pool_tag IS NOT NULL"
+	if len(clauses) > 0 {
+		where += " AND " + strings.Join(clauses, " AND ")
+	}
+
+	query := fmt.Sprintf(`
+		SELECT DISTINCT pool_tag
+		FROM blocks
+		WHERE %s
+		ORDER BY pool_tag ASC
+	`, where)
+
+	rows, err := d.Pool.Query(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("db: unmapped pool tags: %w", err)
+	}
+	defer rows.Close()
+
+	var out []string
+	for rows.Next() {
+		var tag string
+		if err := rows.Scan(&tag); err != nil {
+			return nil, fmt.Errorf("db: unmapped pool tags: scan: %w", err)
+		}
+		out = append(out, tag)
+	}
+	return out, rows.Err()
+}
+
 // BlockTimeBucketRow is one row of the height-bucketed block-time report: the median
 // inter-block time (seconds) for blocks in [BucketStart, BucketEnd] that have a usable
 // predecessor, plus how many blocks in that bucket actually contributed a sample.

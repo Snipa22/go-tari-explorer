@@ -12,6 +12,7 @@ package analysis
 import (
 	"context"
 	"fmt"
+	"sort"
 
 	"github.com/Snipa22/go-tari-explorer/internal/chartrender"
 	"github.com/Snipa22/go-tari-explorer/internal/db"
@@ -77,6 +78,41 @@ func AlgoDistribution(ctx context.Context, database *db.DB, bucketSize, fromHeig
 		}
 	}
 	return points, AlgoOrder, nil
+}
+
+// PoolOptions builds the full ?pool= choice list for the pool-algo-breakdown view's
+// dropdown: every mappings[i].CanonicalName (the folded, display-ready pool series
+// names - see db.PoolTagMapping / DefaultPoolTagMappings) plus every real pool_tag
+// currently stored in `blocks` that doesn't match any mapping's MatchPrefix (see
+// db.DB.UnmappedPoolTags) - pool operators who haven't (yet) been folded into a
+// canonical mapping, whose raw pool_tag is nonetheless just as valid a literal ?pool=
+// value per db.AlgoBucketCountsForPool's doc comment. The combined set is deduped and
+// sorted alphabetically, so the dropdown has a stable order independent of mapping
+// declaration order or database row order.
+func PoolOptions(ctx context.Context, database *db.DB, mappings []db.PoolTagMapping) ([]string, error) {
+	unmapped, err := database.UnmappedPoolTags(ctx, mappings)
+	if err != nil {
+		return nil, fmt.Errorf("analysis: pool options: %w", err)
+	}
+
+	seen := make(map[string]struct{}, len(mappings)+len(unmapped))
+	var out []string
+	for _, m := range mappings {
+		if _, ok := seen[m.CanonicalName]; ok {
+			continue
+		}
+		seen[m.CanonicalName] = struct{}{}
+		out = append(out, m.CanonicalName)
+	}
+	for _, tag := range unmapped {
+		if _, ok := seen[tag]; ok {
+			continue
+		}
+		seen[tag] = struct{}{}
+		out = append(out, tag)
+	}
+	sort.Strings(out)
+	return out, nil
 }
 
 // PoolShare loads db.PoolShareBucketCounts for [fromHeight, toHeight] (capped to topN
