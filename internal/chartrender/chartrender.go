@@ -12,6 +12,9 @@ package chartrender
 import (
 	"bytes"
 	"fmt"
+	"image"
+	"image/color"
+	"image/png"
 	"sort"
 
 	chart "github.com/wcharczuk/go-chart/v2"
@@ -228,4 +231,29 @@ func LineChart(points []Point, seriesOrder []string, title, xLabel, yLabel strin
 	}
 
 	return renderPNG(c)
+}
+
+// PlaceholderPNG renders a minimal blank placeholder PNG - matching the dark theme's
+// canvas fill color, sized DefaultWidth x DefaultHeight so it drops into the same
+// <img> slot a real chart would occupy without a layout jump once there's enough data
+// to plot one. Deliberately not a go-chart chart.Chart (that type requires at least
+// one non-empty Series, see StackedAreaChart/LineChart's own "no points"/"no series"
+// guards above): this is for the case call sites hit *before* they'd even have a
+// series to hand it - e.g. 0 or 1 mempool_snapshots rows, not enough to draw a
+// meaningful line - so a companion PNG route can still return a valid image (never a
+// 500) rather than needing its own chart.Chart-shaped workaround for "not enough
+// points to satisfy those guards".
+func PlaceholderPNG() ([]byte, error) {
+	bg := color.RGBA{R: 0x17, G: 0x17, B: 0x1b, A: 255}
+	img := image.NewRGBA(image.Rect(0, 0, DefaultWidth, DefaultHeight))
+	for y := 0; y < DefaultHeight; y++ {
+		for x := 0; x < DefaultWidth; x++ {
+			img.Set(x, y, bg)
+		}
+	}
+	buf := bytes.NewBuffer(nil)
+	if err := png.Encode(buf, img); err != nil {
+		return nil, fmt.Errorf("chartrender: placeholder: encode: %w", err)
+	}
+	return buf.Bytes(), nil
 }

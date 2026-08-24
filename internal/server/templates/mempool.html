@@ -1,0 +1,49 @@
+{{define "content"}}
+{{if .TxUnavailable}}
+<h2>Mempool (unavailable)</h2>
+{{else if .TxError}}
+<h2>Mempool (unavailable)</h2>
+{{else}}
+<h2>Mempool ({{.TxCount}})</h2>
+{{end}}
+<nav><a href="/mempool/history">Mempool History &raquo;</a></nav>
+
+<h3>Stats</h3>
+{{if .StatsUnavailable}}
+<p class="search-status search-unavailable">Mempool stats unavailable: no base-node GRPC host configured.</p>
+{{else if .StatsError}}
+<p class="search-status search-error">{{.StatsError}}</p>
+{{else}}
+<div class="stat-grid">
+    <div class="stat-card"><div class="label">Unconfirmed Txs</div><div class="value">{{.Stats.UnconfirmedTxs}}</div></div>
+    <div class="stat-card"><div class="label">Reorg Txs</div><div class="value">{{.Stats.ReorgTxs}}</div></div>
+    <div class="stat-card"><div class="label">Unconfirmed Weight</div><div class="value">{{.Stats.UnconfirmedWeight}}</div></div>
+</div>
+{{end}}
+
+<h3>Pending Transactions</h3>
+{{if .TxUnavailable}}
+<p class="search-status search-unavailable">Pending transaction list unavailable: no base-node GRPC host configured.</p>
+{{else if .TxError}}
+<p class="search-status search-error">{{.TxError}}</p>
+{{else if .Txs}}
+<table>
+    <thead>
+    <tr><th>Excess Signature</th><th>Total Fee</th><th>Inputs</th><th>Outputs</th><th>Kernels</th></tr>
+    </thead>
+    <tbody>
+    {{range .Txs}}
+    <tr>
+        <td class="hex-cell">{{.ExcessSigShort}}</td>
+        <td>{{.FeeXTM}}</td>
+        <td>{{.InputCount}}</td>
+        <td>{{.OutputCount}}</td>
+        <td>{{.KernelCount}}</td>
+    </tr>
+    {{end}}
+    </tbody>
+</table>
+{{else}}
+<p class="empty-note">No pending transactions.</p>
+{{end}}
+{{end}}

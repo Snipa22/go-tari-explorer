@@ -1008,3 +1008,126 @@ func (d *DB) ListMempoolSnapshots(ctx context.Context, from, to *time.Time) ([]M
 	}
 	return out, rows.Err()
 }
+
+// PoolCountRow is one row of the "how many of the most recent N blocks were mined by
+// each pool" breakdown - see RecentBlocksStats. PoolTag is either a real
+// (mapping-folded, see PoolTagMapping) pool_tag value or the literal string "unknown"
+// for a NULL pool_tag, matching PoolShareBucketRow's convention. Unlike
+// PoolShareBucketCounts, there is no topN/"other" folding here - the last-100-blocks
+// sample is small enough that every distinct (mapped) pool tag present is returned as
+// its own row.
+type PoolCountRow struct {
+	PoolTag string
+	Count   int64
+}
+
+// AlgoCountRow is one row of the "how many of the most recent N blocks were mined on
+// each pow-algo" breakdown - see RecentBlocksStats.
+type AlgoCountRow struct {
+	Algo  string
+	Count int64
+}
+
+// RecentBlocksStats is the front-page "at a glance" snapshot over the most recently
+// indexed limit blocks (by height descending): a pool-tag breakdown, a pow-algo
+// breakdown, and the average difficulty over that same sample. SampleCount is how many
+// blocks actually contributed (== limit once at least that many blocks are indexed,
+// less before then, 0 on an empty table).
+type RecentBlocksStats struct {
+	Pools         []PoolCountRow
+	Algos         []AlgoCountRow
+	AvgDifficulty float64
+	SampleCount   int64
+}
+
+// RecentBlocksStats computes the front-page pool/algo breakdown and average difficulty
+// over the most recently indexed `limit` blocks (ORDER BY height DESC LIMIT limit), in
+// a single round trip to Postgres: one CTE selects the candidate blocks (with pool_tag
+// folded through mappings, the same LIKE-prefix mechanism PoolShareBucketCounts uses -
+// see PoolTagMapping's doc comment), three more CTEs aggregate that same sample three
+// different ways (per-pool count, per-algo count, overall avg difficulty + sample
+// count), and the results are UNION ALL'd together with a `kind` discriminator column
+// so the three different-shaped aggregates can travel back as one result set rather
+// than three separate queries. All aggregation happens Postgres-side; raw block rows
+// are never pulled into Go. limit must be > 0.
+func (d *DB) RecentBlocksStats(ctx context.Context, limit int, mappings []PoolTagMapping) (RecentBlocksStats, error) {
+	if limit <= 0 {
+		return RecentBlocksStats{}, fmt.Errorf("db: recent blocks stats: limit must be > 0")
+	}
+
+	// args starts with the single fixed positional param ($1, the LIMIT); each
+	// mapping entry then appends its own (LIKE pattern, canonical name) pair as two
+	// more params, referenced by position in the CASE expression built below - same
+	// pattern as PoolShareBucketCounts.
+	args := []interface{}{limit}
+	var caseClauses strings.Builder
+	for _, m := range mappings {
+		args = append(args, m.MatchPrefix+"%", m.CanonicalName)
+		patternParam := len(args) - 1
+		nameParam := len(args)
+		fmt.Fprintf(&caseClauses, "\n				WHEN pool_tag LIKE $%d THEN $%d", patternParam, nameParam)
+	}
+
+	query := fmt.Sprintf(`
+		WITH recent AS (
+			SELECT
+				pow_algo,
+				difficulty,
+				CASE
+					WHEN pool_tag IS NULL THEN 'unknown'%s
+					ELSE pool_tag
+				END AS mapped_pool
+			FROM blocks
+			ORDER BY height DESC
+			LIMIT $1
+		),
+		pool_counts AS (
+			SELECT 'pool' AS kind, mapped_pool AS key, COUNT(*) AS cnt, NULL::float8 AS avg_diff
+			FROM recent
+			GROUP BY mapped_pool
+		),
+		algo_counts AS (
+			SELECT 'algo' AS kind, pow_algo AS key, COUNT(*) AS cnt, NULL::float8 AS avg_diff
+			FROM recent
+			GROUP BY pow_algo
+		),
+		diff_avg AS (
+			SELECT 'difficulty' AS kind, 'avg' AS key, COUNT(*) AS cnt, AVG(difficulty) AS avg_diff
+			FROM recent
+		)
+		SELECT kind, key, cnt, avg_diff FROM pool_counts
+		UNION ALL
+		SELECT kind, key, cnt, avg_diff FROM algo_counts
+		UNION ALL
+		SELECT kind, key, cnt, avg_diff FROM diff_avg
+		ORDER BY kind, cnt DESC
+	`, caseClauses.String())
+
+	rows, err := d.Pool.Query(ctx, query, args...)
+	if err != nil {
+		return RecentBlocksStats{}, fmt.Errorf("db: recent blocks stats: %w", err)
+	}
+	defer rows.Close()
+
+	var out RecentBlocksStats
+	for rows.Next() {
+		var kind, key string
+		var cnt int64
+		var avgDiff *float64
+		if err := rows.Scan(&kind, &key, &cnt, &avgDiff); err != nil {
+			return RecentBlocksStats{}, fmt.Errorf("db: recent blocks stats: scan: %w", err)
+		}
+		switch kind {
+		case "pool":
+			out.Pools = append(out.Pools, PoolCountRow{PoolTag: key, Count: cnt})
+		case "algo":
+			out.Algos = append(out.Algos, AlgoCountRow{Algo: key, Count: cnt})
+		case "difficulty":
+			out.SampleCount = cnt
+			if avgDiff != nil {
+				out.AvgDifficulty = *avgDiff
+			}
+		}
+	}
+	return out, rows.Err()
+}

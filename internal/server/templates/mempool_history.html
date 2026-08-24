@@ -1,0 +1,6 @@
+{{define "content"}}
+<h2>Mempool History</h2>
+<nav><a href="/mempool">&laquo; Mempool</a></nav>
+<p style="color:#888;">Unconfirmed transaction count and total unconfirmed weight over time, from periodic mempool_snapshots polls (see internal/mempoolpoller). Optionally bound the range with ?from=&to= (RFC3339 or unix timestamp).</p>
+<img src="{{.ImgSrc}}" alt="Mempool history chart" style="max-width:100%;">
+{{end}}

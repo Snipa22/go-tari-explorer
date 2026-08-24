@@ -22,7 +22,9 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
+	"github.com/Snipa22/go-tari-explorer/internal/analysis"
 	"github.com/Snipa22/go-tari-explorer/internal/db"
+	"github.com/Snipa22/go-tari-explorer/internal/nodeclient"
 	"github.com/Snipa22/go-tari-explorer/internal/poolstats"
 	"github.com/Snipa22/go-tari-explorer/internal/txsearch"
 )
@@ -32,6 +34,12 @@ var templateFS embed.FS
 
 // PageSize is the number of blocks returned per page/HTMX "load more" request.
 const PageSize = 25
+
+// recentBlocksStatsSample is how many of the most-recently-indexed blocks the front
+// page's pool/algo-breakdown and avg-difficulty stat cards are computed over (see
+// db.RecentBlocksStats) - a real-time, non-bucketed "last N blocks" snapshot, as
+// opposed to the historical, height-bucketed /analysis charts.
+const recentBlocksStatsSample = 100
 
 // microMinotariPerXTM is the conversion factor for displaying kernel fees (stored as
 // raw MicroMinotari, matching the wire type) as human-readable XTM.
@@ -47,24 +55,42 @@ type Server struct {
 	DB        *db.DB
 	PoolStats poolstats.PoolStatsProvider
 	Search    *txsearch.Searcher // nil-safe: a nil Searcher makes /search and /tx-state report "not configured" rather than panicking
+	// Node is the live base-node GRPC client backing /mempool's live tx list/stats
+	// and the front page's live mempool-stats panel. nil-safe exactly like Search
+	// above - a nil Node makes those degrade to an "unavailable" message rather than
+	// panicking/500ing; it is deliberately the *same* client instance Search's
+	// Searcher.Node wraps (see cmd/server/main.go), not a second dialed connection.
+	Node *nodeclient.Client
 	// PoolStatsBaseURL is displayed on the pool-stats page as a "source" attribution -
 	// purely informational, not used for any request.
-	PoolStatsBaseURL  string
-	listTmpl          *template.Template
-	detailTmpl        *template.Template
-	rowsTmpl          *template.Template
-	poolStatsTmpl     *template.Template
-	analysisIndexTmpl *template.Template
-	analysisViewTmpl  *template.Template
-	searchTmpl        *template.Template
-	txStateTmpl       *template.Template
+	PoolStatsBaseURL   string
+	listTmpl           *template.Template
+	detailTmpl         *template.Template
+	rowsTmpl           *template.Template
+	poolStatsTmpl      *template.Template
+	analysisIndexTmpl  *template.Template
+	analysisViewTmpl   *template.Template
+	searchTmpl         *template.Template
+	txStateTmpl        *template.Template
+	mempoolTmpl        *template.Template
+	mempoolHistoryTmpl *template.Template
+	// searchRateLimiter is applied (via rateLimitMiddleware, see ratelimit.go) to
+	// every route that triggers a live GRPC call out to the operator's own base node
+	// per request: /search, /tx-state, /mempool, /mempool/history, and / (the front
+	// page now also fetches live mempool stats, see handleBlocksList).
+	searchRateLimiter *ipRateLimiter
 }
 
 // New parses the embedded templates and constructs a Server. Returns an error if the
 // templates fail to parse (a build-time programming error, not a runtime/request error).
 // searcher may be nil (e.g. no base-node hosts configured for search) - /search and
-// /tx-state still render, reporting search as unavailable rather than 500ing.
-func New(database *db.DB, poolStatsProvider poolstats.PoolStatsProvider, poolStatsBaseURL string, searcher *txsearch.Searcher) (*Server, error) {
+// /tx-state still render, reporting search as unavailable rather than 500ing. node may
+// also be nil (same "no base-node hosts configured" case) - /mempool and the front
+// page's mempool-stats panel degrade to an "unavailable" message rather than 500ing.
+// node is deliberately expected to be the *same* *nodeclient.Client instance passed
+// into searcher (via txsearch.New), not a second dialed connection - see
+// cmd/server/main.go.
+func New(database *db.DB, poolStatsProvider poolstats.PoolStatsProvider, poolStatsBaseURL string, searcher *txsearch.Searcher, node *nodeclient.Client) (*Server, error) {
 	listTmpl, err := template.New("layout.html").Funcs(funcs).ParseFS(templateFS, "templates/layout.html", "templates/blocks_list.html")
 	if err != nil {
 		return nil, fmt.Errorf("server: parse blocks list templates: %w", err)
@@ -97,26 +123,47 @@ func New(database *db.DB, poolStatsProvider poolstats.PoolStatsProvider, poolSta
 	if err != nil {
 		return nil, fmt.Errorf("server: parse tx state template: %w", err)
 	}
+	mempoolTmpl, err := template.New("layout.html").Funcs(funcs).ParseFS(templateFS, "templates/layout.html", "templates/mempool.html")
+	if err != nil {
+		return nil, fmt.Errorf("server: parse mempool template: %w", err)
+	}
+	mempoolHistoryTmpl, err := template.New("layout.html").Funcs(funcs).ParseFS(templateFS, "templates/layout.html", "templates/mempool_history.html")
+	if err != nil {
+		return nil, fmt.Errorf("server: parse mempool history template: %w", err)
+	}
 	return &Server{
-		DB:                database,
-		PoolStats:         poolStatsProvider,
-		Search:            searcher,
-		PoolStatsBaseURL:  poolStatsBaseURL,
-		listTmpl:          listTmpl,
-		detailTmpl:        detailTmpl,
-		rowsTmpl:          rowsTmpl,
-		poolStatsTmpl:     poolStatsTmpl,
-		analysisIndexTmpl: analysisIndexTmpl,
-		analysisViewTmpl:  analysisViewTmpl,
-		searchTmpl:        searchTmpl,
-		txStateTmpl:       txStateTmpl,
+		DB:                 database,
+		PoolStats:          poolStatsProvider,
+		Search:             searcher,
+		Node:               node,
+		PoolStatsBaseURL:   poolStatsBaseURL,
+		listTmpl:           listTmpl,
+		detailTmpl:         detailTmpl,
+		rowsTmpl:           rowsTmpl,
+		poolStatsTmpl:      poolStatsTmpl,
+		analysisIndexTmpl:  analysisIndexTmpl,
+		analysisViewTmpl:   analysisViewTmpl,
+		searchTmpl:         searchTmpl,
+		txStateTmpl:        txStateTmpl,
+		mempoolTmpl:        mempoolTmpl,
+		mempoolHistoryTmpl: mempoolHistoryTmpl,
+		searchRateLimiter:  newIPRateLimiter(defaultRateLimitPerSecond, defaultRateLimitBurst),
 	}, nil
 }
 
-// Handler builds the top-level http.Handler with all routes registered.
+// Handler builds the top-level http.Handler with all routes registered. Routes that
+// trigger a live GRPC call to the operator's configured base node per request
+// (/search, /tx-state, /mempool - and, now that it also renders a live mempool-stats
+// panel, / itself) are wrapped in s.searchRateLimiter.rateLimitMiddleware - see
+// ratelimit.go's doc comment for why. /mempool/history is a Postgres-only read (like
+// the /analysis/* pages) but is wrapped anyway per this feature's design: it's a
+// child page of /mempool, reachable from it, and keeping the whole /mempool subtree
+// under one consistent policy is simpler than explaining why one of its two pages is
+// exempt. Its companion /mempool/history.png PNG endpoint is left unwrapped,
+// consistent with /analysis/*.png never being wrapped either.
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
-	mux.HandleFunc("GET /", s.handleBlocksList)
+	mux.HandleFunc("GET /", s.searchRateLimiter.rateLimitMiddleware(s.handleBlocksList))
 	mux.HandleFunc("GET /blocks/partial", s.handleBlocksPartial)
 	mux.HandleFunc("GET /blocks/{height}", s.handleBlockDetail)
 	mux.HandleFunc("GET /pool-stats", s.handlePoolStats)
@@ -131,8 +178,11 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /analysis/pool-algo-breakdown.png", s.handleAnalysisPoolAlgoBreakdownPNG)
 	mux.HandleFunc("GET /analysis/block-time.png", s.handleAnalysisBlockTimePNG)
 	mux.HandleFunc("GET /analysis/difficulty.png", s.handleAnalysisDifficultyPNG)
-	mux.HandleFunc("GET /search", s.handleSearch)
-	mux.HandleFunc("GET /tx-state", s.handleTxState)
+	mux.HandleFunc("GET /search", s.searchRateLimiter.rateLimitMiddleware(s.handleSearch))
+	mux.HandleFunc("GET /tx-state", s.searchRateLimiter.rateLimitMiddleware(s.handleTxState))
+	mux.HandleFunc("GET /mempool", s.searchRateLimiter.rateLimitMiddleware(s.handleMempool))
+	mux.HandleFunc("GET /mempool/history", s.searchRateLimiter.rateLimitMiddleware(s.handleMempoolHistory))
+	mux.HandleFunc("GET /mempool/history.png", s.handleMempoolHistoryPNG)
 	return mux
 }
 
@@ -168,6 +218,25 @@ func toBlockViews(blocks []db.Block) []blockView {
 	return out
 }
 
+// recentBlocksStatsView adapts db.RecentBlocksStats for template rendering
+// (human-friendly average-difficulty formatting) - see db.RecentBlocksStats and
+// handleBlocksList below.
+type recentBlocksStatsView struct {
+	db.RecentBlocksStats
+}
+
+// AvgDifficultyDisplay formats AvgDifficulty with 2 decimal places.
+func (v recentBlocksStatsView) AvgDifficultyDisplay() string {
+	return strconv.FormatFloat(v.AvgDifficulty, 'f', 2, 64)
+}
+
+// handleBlocksList serves the front page: the paginated blocks table (unchanged from
+// before this feature) plus two new "at a glance" panels - a last-100-blocks pool/algo
+// breakdown (db.RecentBlocksStats, task 5a) and a live mempool-stats summary (task 5b,
+// the same GetMempoolStats numbers /mempool shows, condensed). Both panels degrade to
+// an inline error message rather than failing the whole page: a RecentBlocksStats
+// query error or an unconfigured/failing s.Node is not reason enough to 500 a page
+// whose main content (the blocks table) loaded fine.
 func (s *Server) handleBlocksList(w http.ResponseWriter, r *http.Request) {
 	blocks, err := s.DB.ListBlocks(r.Context(), math.MaxInt64, PageSize)
 	if err != nil {
@@ -175,7 +244,36 @@ func (s *Server) handleBlocksList(w http.ResponseWriter, r *http.Request) {
 		log.Printf("server: list blocks: %v", err)
 		return
 	}
-	data := struct{ Blocks []blockView }{Blocks: toBlockViews(blocks)}
+
+	data := struct {
+		Blocks            []blockView
+		RecentStats       recentBlocksStatsView
+		RecentStatsError  string
+		MempoolStats      *mempoolStatsView
+		MempoolStatsError string
+	}{Blocks: toBlockViews(blocks)}
+
+	recentStats, err := s.DB.RecentBlocksStats(r.Context(), recentBlocksStatsSample, analysis.DefaultPoolTagMappings)
+	if err != nil {
+		log.Printf("server: recent blocks stats: %v", err)
+		data.RecentStatsError = "unable to load recent-blocks stats"
+	} else {
+		data.RecentStats = recentBlocksStatsView{recentStats}
+	}
+
+	if s.Node == nil {
+		data.MempoolStatsError = "mempool stats unavailable: no base-node GRPC host configured"
+	} else {
+		stats, err := s.Node.GetMempoolStats(r.Context())
+		if err != nil {
+			log.Printf("server: front page mempool stats: %v", err)
+			data.MempoolStatsError = "mempool stats unavailable"
+		} else {
+			v := newMempoolStatsView(stats)
+			data.MempoolStats = &v
+		}
+	}
+
 	if err := s.listTmpl.Execute(w, data); err != nil {
 		log.Printf("server: render blocks list: %v", err)
 	}
