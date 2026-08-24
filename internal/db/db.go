@@ -953,24 +953,47 @@ func (d *DB) BlockTimeSummary(ctx context.Context, fromHeight, toHeight uint64) 
 	return r, nil
 }
 
-// DifficultyBucketRow is one row of the height-bucketed average-difficulty report:
-// AvgDifficulty is the mean `difficulty` column value over blocks in
-// [BucketStart, BucketEnd]. Difficulty is used directly as a hashrate proxy (difficulty
-// is proportional to expected hashes-per-block; hashrate = difficulty / block_time, but
-// this repo's blocks table - and the upstream go-tari-grpc-lib v3.2.0 BlockHeader proto
-// it's decomposed from - carries no per-network target-block-time field, so a literal
-// hashrate figure isn't derivable from indexed data alone). A difficulty-over-height
-// chart is the intended stand-in; see internal/server/analysis.go's difficulty handler.
+// DifficultyBucketRow is one row of the height-bucketed average-difficulty report: for
+// blocks in [BucketStart, BucketEnd], the mean `difficulty` column value computed
+// separately per pow_algo (RXM/RXT/C29/SHA3X), mirroring AlgoBucketRow's fixed-column
+// per-algo shape rather than blending all four algos' difficulties into one meaningless
+// average. RXM/RXT/C29/SHA3X difficulties differ by orders of magnitude and measure
+// entirely different, non-comparable proof-of-work spaces, so a single blended average
+// across all of them has no real-world interpretation - see AlgoBucketRow's doc comment
+// for the same per-algo-column precedent this mirrors.
+//
+// Difficulty is used directly as a hashrate proxy (difficulty is proportional to
+// expected hashes-per-block; hashrate = difficulty / block_time, but this repo's blocks
+// table - and the upstream go-tari-grpc-lib v3.2.0 BlockHeader proto it's decomposed
+// from - carries no per-network target-block-time field, so a literal hashrate figure
+// isn't derivable from indexed data alone). A per-algo difficulty-over-height chart is
+// the intended stand-in; see internal/server/analysis.go's difficulty handler.
+//
+// Each field is *float64, not float64, and nil (not a pointer to 0.0) when that algo had
+// zero blocks in the bucket: AVG() over zero rows is SQL NULL, and NULL here means
+// "no data for this algo in this bucket", which is semantically distinct from "the
+// average difficulty for this algo in this bucket is exactly 0.0" (never a valid real
+// value). Coercing that NULL to 0.0 would misrepresent absence-of-data as a real
+// measurement, so it must stay a nil pointer all the way through this layer (see
+// BlockTimeBucketRow.MedianSeconds for the same *float64-for-NULL convention already
+// used elsewhere in this file).
 type DifficultyBucketRow struct {
-	BucketStart   uint64
-	BucketEnd     uint64
-	AvgDifficulty float64
+	BucketStart uint64
+	BucketEnd   uint64
+	RXM         *float64
+	RXT         *float64
+	C29         *float64
+	SHA3X       *float64
 }
 
 // DifficultyBucketAvg groups blocks in [fromHeight, toHeight] (inclusive) into the same
-// height buckets as AlgoBucketCounts and averages `difficulty` per bucket, aggregated
-// entirely in Postgres via GROUP BY (never pulling raw rows into Go). bucketSize must be
-// > 0.
+// height buckets as AlgoBucketCounts and, per bucket, averages `difficulty` separately
+// for each of the four known pow_algo values via FILTER-clause conditional AVG (mirrors
+// AlgoBucketCounts' FILTER pattern exactly, substituting AVG(difficulty) for COUNT(*)),
+// aggregated entirely in Postgres (never pulling raw rows into Go). A bucket/algo
+// combination with zero blocks yields SQL NULL from AVG(), scanned into that field's
+// *float64 as a nil pointer - see DifficultyBucketRow's doc comment for why that must
+// never be coerced to 0.0. bucketSize must be > 0.
 func (d *DB) DifficultyBucketAvg(ctx context.Context, bucketSize uint64, fromHeight, toHeight uint64) ([]DifficultyBucketRow, error) {
 	if bucketSize == 0 {
 		return nil, fmt.Errorf("db: difficulty bucket avg: bucket size must be > 0")
@@ -979,7 +1002,10 @@ func (d *DB) DifficultyBucketAvg(ctx context.Context, bucketSize uint64, fromHei
 	rows, err := d.Pool.Query(ctx, `
 		SELECT
 			(height / $1) * $1 AS bucket_start,
-			AVG(difficulty) AS avg_difficulty
+			AVG(difficulty) FILTER (WHERE pow_algo = 'RXM')   AS rxm,
+			AVG(difficulty) FILTER (WHERE pow_algo = 'RXT')   AS rxt,
+			AVG(difficulty) FILTER (WHERE pow_algo = 'C29')   AS c29,
+			AVG(difficulty) FILTER (WHERE pow_algo = 'SHA3X') AS sha3x
 		FROM blocks
 		WHERE height BETWEEN $2 AND $3
 		GROUP BY bucket_start
@@ -993,7 +1019,7 @@ func (d *DB) DifficultyBucketAvg(ctx context.Context, bucketSize uint64, fromHei
 	var out []DifficultyBucketRow
 	for rows.Next() {
 		var r DifficultyBucketRow
-		if err := rows.Scan(&r.BucketStart, &r.AvgDifficulty); err != nil {
+		if err := rows.Scan(&r.BucketStart, &r.RXM, &r.RXT, &r.C29, &r.SHA3X); err != nil {
 			return nil, fmt.Errorf("db: difficulty bucket avg: scan: %w", err)
 		}
 		r.BucketEnd = r.BucketStart + bucketSize - 1

@@ -568,6 +568,70 @@ func TestUnmappedPoolTags(t *testing.T) {
 	}
 }
 
+// TestDifficultyBucketAvg_PerAlgoDistinct is the core regression test for per-algo
+// average difficulty: it seeds two algos with deliberately very different difficulty
+// magnitudes in the same bucket so that an (incorrect) single blended average across
+// all four algo columns would be nowhere near either algo's true average, making a
+// regression to a blended-average shape unmistakable.
+func TestDifficultyBucketAvg_PerAlgoDistinct(t *testing.T) {
+	d := openTestDB(t)
+	ctx := context.Background()
+
+	// Bucket [0,999]: RXM 1000/2000 -> avg 1500; SHA3X 10/20 -> avg 15.
+	seedBlockFull(t, d, 0, "RXM", nil, 1000)
+	seedBlockFull(t, d, 1, "RXM", nil, 2000)
+	seedBlockFull(t, d, 2, "SHA3X", nil, 10)
+	seedBlockFull(t, d, 3, "SHA3X", nil, 20)
+
+	rows, err := d.DifficultyBucketAvg(ctx, 1000, 0, 999)
+	if err != nil {
+		t.Fatalf("DifficultyBucketAvg: %v", err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("len(rows) = %d, want 1", len(rows))
+	}
+	r := rows[0]
+	if r.RXM == nil || *r.RXM != 1500 {
+		t.Errorf("RXM = %v, want 1500", r.RXM)
+	}
+	if r.SHA3X == nil || *r.SHA3X != 15 {
+		t.Errorf("SHA3X = %v, want 15", r.SHA3X)
+	}
+}
+
+// TestDifficultyBucketAvg_ZeroBlocksIsNil proves that an algo with zero blocks in a
+// bucket that otherwise has data yields a nil *float64 (SQL NULL), not a pointer to
+// 0.0 - 0.0 would falsely claim "the average difficulty is actually zero", which is
+// never a valid real value and is a semantically different result from "no data".
+func TestDifficultyBucketAvg_ZeroBlocksIsNil(t *testing.T) {
+	d := openTestDB(t)
+	ctx := context.Background()
+
+	// Bucket [0,999]: RXM only. RXT/C29/SHA3X all have zero blocks.
+	seedBlockFull(t, d, 0, "RXM", nil, 100)
+
+	rows, err := d.DifficultyBucketAvg(ctx, 1000, 0, 999)
+	if err != nil {
+		t.Fatalf("DifficultyBucketAvg: %v", err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("len(rows) = %d, want 1", len(rows))
+	}
+	r := rows[0]
+	if r.RXM == nil || *r.RXM != 100 {
+		t.Errorf("RXM = %v, want 100", r.RXM)
+	}
+	if r.C29 != nil {
+		t.Errorf("C29 = %v, want nil (zero blocks for C29 in this bucket)", *r.C29)
+	}
+	if r.RXT != nil {
+		t.Errorf("RXT = %v, want nil (zero blocks for RXT in this bucket)", *r.RXT)
+	}
+	if r.SHA3X != nil {
+		t.Errorf("SHA3X = %v, want nil (zero blocks for SHA3X in this bucket)", *r.SHA3X)
+	}
+}
+
 // bytesOf returns an n-byte slice filled with fill, for building distinct
 // fixture excess-sig/commitment values without hand-writing byte literals.
 func bytesOf(n int, fill byte) []byte {

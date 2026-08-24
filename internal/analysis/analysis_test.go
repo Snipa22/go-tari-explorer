@@ -349,35 +349,63 @@ func TestBlockTime_NoSamples(t *testing.T) {
 	}
 }
 
+// TestDifficulty is the core regression test for per-algo average difficulty on the
+// chart-reshaping layer: it seeds two algos with deliberately very different
+// difficulty magnitudes in the same bucket so that an (incorrect) single blended
+// average across all algos would be nowhere near either algo's true average, making a
+// regression to the old blended-line behavior unmistakable. It also covers a bucket
+// where one algo (C29) has zero blocks, asserting that algo's key is absent from that
+// bucket's Series map entirely (not present with value 0).
 func TestDifficulty(t *testing.T) {
 	database := setupTestDB(t)
 	ctx := context.Background()
 
-	// Bucket [0,999]: difficulties 100, 200, 300 -> avg 200.
-	seedBlock(t, database, 0, 1000, "RXM", 100, nil)
-	seedBlock(t, database, 1, 1010, "RXM", 200, nil)
-	seedBlock(t, database, 2, 1020, "RXM", 300, nil)
-	// Bucket [1000,1999]: difficulty 1000.
-	seedBlock(t, database, 1000, 1030, "RXM", 1000, nil)
+	// Bucket [0,999]: RXM 1000/2000 (avg 1500), SHA3X 10/20 (avg 15). C29 has zero
+	// blocks in this bucket.
+	seedBlock(t, database, 0, 1000, "RXM", 1000, nil)
+	seedBlock(t, database, 1, 1010, "RXM", 2000, nil)
+	seedBlock(t, database, 2, 1020, "SHA3X", 10, nil)
+	seedBlock(t, database, 3, 1030, "SHA3X", 20, nil)
+	// Bucket [1000,1999]: RXM only, difficulty 500.
+	seedBlock(t, database, 1000, 1040, "RXM", 500, nil)
 
-	points, seriesName, err := Difficulty(ctx, database, 1000, 0, 1999)
+	points, order, err := Difficulty(ctx, database, 1000, 0, 1999)
 	if err != nil {
 		t.Fatalf("Difficulty: %v", err)
 	}
-	if seriesName != difficultySeriesName {
-		t.Errorf("seriesName = %q, want %q", seriesName, difficultySeriesName)
+	if len(order) != len(AlgoOrder) {
+		t.Fatalf("order = %v, want %v", order, AlgoOrder)
+	}
+	for i, name := range AlgoOrder {
+		if order[i] != name {
+			t.Errorf("order[%d] = %q, want %q (full order %v)", i, order[i], name, order)
+		}
 	}
 	if len(points) != 2 {
 		t.Fatalf("len(points) = %d, want 2", len(points))
 	}
-	byX := map[float64]float64{}
+	byX := map[float64]map[string]float64{}
 	for _, p := range points {
-		byX[p.X] = p.Series[seriesName]
+		byX[p.X] = p.Series
 	}
-	if byX[0] != 200 {
-		t.Errorf("bucket 0 avg difficulty = %v, want 200", byX[0])
+	b0, ok := byX[0]
+	if !ok {
+		t.Fatalf("missing bucket 0 in points: %+v", points)
 	}
-	if byX[1000] != 1000 {
-		t.Errorf("bucket 1000 avg difficulty = %v, want 1000", byX[1000])
+	if b0["RXM"] != 1500 {
+		t.Errorf("bucket 0 RXM avg difficulty = %v, want 1500", b0["RXM"])
+	}
+	if b0["SHA3X"] != 15 {
+		t.Errorf("bucket 0 SHA3X avg difficulty = %v, want 15", b0["SHA3X"])
+	}
+	if _, ok := b0["C29"]; ok {
+		t.Errorf("bucket 0 C29 must be absent from Series (zero blocks), got %+v", b0)
+	}
+	b1, ok := byX[1000]
+	if !ok {
+		t.Fatalf("missing bucket 1000 in points: %+v", points)
+	}
+	if b1["RXM"] != 500 {
+		t.Errorf("bucket 1000 RXM avg difficulty = %v, want 500", b1["RXM"])
 	}
 }
