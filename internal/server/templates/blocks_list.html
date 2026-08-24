@@ -1,5 +1,33 @@
 {{define "content"}}
 <h2>Blocks</h2>
+
+<h3>Last {{.RecentStats.SampleCount}} Blocks</h3>
+{{if .RecentStatsError}}
+<p style="color:#ff8080;">{{.RecentStatsError}}</p>
+{{else}}
+<div class="stat-grid">
+    {{range .RecentStats.Pools}}
+    <div class="stat-card"><div class="label">Pool: {{.PoolTag}}</div><div class="value">{{.Count}}</div></div>
+    {{end}}
+    {{range .RecentStats.Algos}}
+    <div class="stat-card"><div class="label">Algo: {{.Algo}}</div><div class="value">{{.Count}}</div></div>
+    {{end}}
+    <div class="stat-card"><div class="label">Avg Difficulty</div><div class="value">{{.RecentStats.AvgDifficultyDisplay}}</div></div>
+</div>
+{{end}}
+
+<h3>Mempool</h3>
+{{if .MempoolStatsError}}
+<p style="color:#ff8080;">{{.MempoolStatsError}}</p>
+{{else}}
+<div class="stat-grid">
+    <div class="stat-card"><div class="label">Unconfirmed Txs</div><div class="value">{{.MempoolStats.UnconfirmedTxs}}</div></div>
+    <div class="stat-card"><div class="label">Reorg Txs</div><div class="value">{{.MempoolStats.ReorgTxs}}</div></div>
+    <div class="stat-card"><div class="label">Unconfirmed Weight</div><div class="value">{{.MempoolStats.UnconfirmedWeight}}</div></div>
+</div>
+{{end}}
+<p><a href="/mempool">Mempool details &raquo;</a></p>
+
 <table>
     <thead>
     <tr><th>Height</th><th>Hash</th><th>Timestamp</th><th>Algo</th><th>Difficulty</th><th>Kernels</th><th>Outputs</th><th>Pool</th></tr>

@@ -47,23 +47,30 @@ func main() {
 	if *nodeHostsFlag != "" {
 		nodeHosts = config.ParseHostList(*nodeHostsFlag)
 	}
-	// A live-search/tx-state Searcher requires at least one configured base-node host.
-	// This is optional for the server to run at all - /search and /tx-state degrade to
-	// an "unavailable" response (see internal/server.handleSearch/handleTxState)
+	// A live-search/tx-state Searcher, and the live mempool tx-list/stats /mempool
+	// route (+ the front page's condensed mempool-stats panel), all require at least
+	// one configured base-node host. This is optional for the server to run at all -
+	// those routes/panels degrade to an "unavailable" response (see
+	// internal/server.handleSearch/handleTxState/handleMempool/handleBlocksList)
 	// rather than the whole process refusing to start, since the blocks list/detail
-	// pages don't need it.
+	// pages don't need it. node is deliberately shared between searcher and
+	// server.New's Node param - one dialed *nodeclient.Client, not two - per
+	// internal/nodeclient's own single-connection-per-host design.
 	var searcher *txsearch.Searcher
+	var node *nodeclient.Client
 	if len(nodeHosts) > 0 {
-		node, err := nodeclient.New(nodeHosts)
+		var err error
+		node, err = nodeclient.New(nodeHosts)
 		if err != nil {
-			log.Printf("server: search unavailable: %v", err)
+			log.Printf("server: search/mempool unavailable: %v", err)
+			node = nil
 		} else {
 			searcher = txsearch.New(database, node)
 		}
 	}
 
 	poolStatsClient := poolstats.NewHTTPClient(*poolStatsBaseURL, nil)
-	srv, err := server.New(database, poolStatsClient, *poolStatsBaseURL, searcher)
+	srv, err := server.New(database, poolStatsClient, *poolStatsBaseURL, searcher, node)
 	if err != nil {
 		log.Fatalf("server: %v", err)
 	}

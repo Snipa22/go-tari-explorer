@@ -67,6 +67,33 @@ func seedBlock(t *testing.T, d *DB, height uint64) {
 	}
 }
 
+// seedBlockFull inserts a minimal valid `blocks` row at height like seedBlock, but
+// with caller-supplied powAlgo/poolTag/difficulty - used by TestRecentBlocksStats and
+// friends, which (unlike seedBlock's other callers) need to control those three
+// fields to exercise the pool/algo breakdown and avg-difficulty aggregation.
+func seedBlockFull(t *testing.T, d *DB, height uint64, powAlgo string, poolTag *string, difficulty int64) {
+	t.Helper()
+	err := d.UpsertBlock(context.Background(), Block{
+		Height:            height,
+		Hash:              "aa",
+		PrevHash:          "bb",
+		OutputMr:          []byte{},
+		BlockOutputMr:     []byte{},
+		KernelMr:          []byte{},
+		InputMr:           []byte{},
+		TotalKernelOffset: []byte{},
+		TotalScriptOffset: []byte{},
+		ValidatorNodeMr:   []byte{},
+		PowData:           []byte{},
+		PowAlgo:           powAlgo,
+		PoolTag:           poolTag,
+		Difficulty:        difficulty,
+	})
+	if err != nil {
+		t.Fatalf("db: seed block %d: %v", height, err)
+	}
+}
+
 func TestReplaceKernelsForBlock_InsertsAndReplaces(t *testing.T) {
 	d := openTestDB(t)
 	ctx := context.Background()
@@ -346,6 +373,98 @@ func TestKernelsOutputs_CascadeDeleteOnBlockRemoval(t *testing.T) {
 	}
 	if len(outputs) != 0 {
 		t.Fatalf("expected outputs to cascade-delete with their block, got %d", len(outputs))
+	}
+}
+
+func TestRecentBlocksStats(t *testing.T) {
+	d := openTestDB(t)
+	ctx := context.Background()
+
+	jagtech := "WUFJagtechE0"
+	other := "OtherPool"
+	seedBlockFull(t, d, 700, "RXM", &jagtech, 100)
+	seedBlockFull(t, d, 701, "RXM", nil, 200)
+	seedBlockFull(t, d, 702, "SHA3X", &other, 300)
+	seedBlockFull(t, d, 703, "SHA3X", &jagtech, 400)
+	seedBlockFull(t, d, 704, "RXT", &jagtech, 500)
+
+	mappings := []PoolTagMapping{{MatchPrefix: "WUF", CanonicalName: "Jagtech"}}
+	got, err := d.RecentBlocksStats(ctx, 100, mappings)
+	if err != nil {
+		t.Fatalf("RecentBlocksStats: %v", err)
+	}
+	if got.SampleCount != 5 {
+		t.Fatalf("expected sample count 5, got %d", got.SampleCount)
+	}
+	wantAvgDiff := (100.0 + 200.0 + 300.0 + 400.0 + 500.0) / 5.0
+	if got.AvgDifficulty != wantAvgDiff {
+		t.Errorf("expected avg difficulty %v, got %v", wantAvgDiff, got.AvgDifficulty)
+	}
+
+	poolCounts := map[string]int64{}
+	for _, p := range got.Pools {
+		poolCounts[p.PoolTag] = p.Count
+	}
+	if poolCounts["Jagtech"] != 3 {
+		t.Errorf("expected Jagtech count 3, got %d (%+v)", poolCounts["Jagtech"], got.Pools)
+	}
+	if poolCounts["unknown"] != 1 {
+		t.Errorf("expected unknown count 1, got %d", poolCounts["unknown"])
+	}
+	if poolCounts["OtherPool"] != 1 {
+		t.Errorf("expected OtherPool count 1, got %d", poolCounts["OtherPool"])
+	}
+
+	algoCounts := map[string]int64{}
+	for _, a := range got.Algos {
+		algoCounts[a.Algo] = a.Count
+	}
+	if algoCounts["RXM"] != 2 || algoCounts["SHA3X"] != 2 || algoCounts["RXT"] != 1 {
+		t.Errorf("unexpected algo breakdown: %+v", got.Algos)
+	}
+}
+
+// TestRecentBlocksStats_LimitBoundsSample proves the `limit` parameter actually
+// bounds the sample to the most recent N blocks (by height descending), not the whole
+// table.
+func TestRecentBlocksStats_LimitBoundsSample(t *testing.T) {
+	d := openTestDB(t)
+	ctx := context.Background()
+
+	for h := uint64(800); h < 805; h++ {
+		seedBlockFull(t, d, h, "RXM", nil, 10)
+	}
+
+	got, err := d.RecentBlocksStats(ctx, 3, nil)
+	if err != nil {
+		t.Fatalf("RecentBlocksStats: %v", err)
+	}
+	if got.SampleCount != 3 {
+		t.Fatalf("expected sample count bounded to limit 3, got %d", got.SampleCount)
+	}
+}
+
+// TestRecentBlocksStats_EmptyTable proves this degrades to a clean zero-value result
+// (not an error, not a crash on e.g. AVG() over zero rows) when `blocks` is empty -
+// the shape the front page sees before the indexer has written anything yet.
+func TestRecentBlocksStats_EmptyTable(t *testing.T) {
+	d := openTestDB(t)
+	ctx := context.Background()
+
+	got, err := d.RecentBlocksStats(ctx, 100, nil)
+	if err != nil {
+		t.Fatalf("RecentBlocksStats: %v", err)
+	}
+	if got.SampleCount != 0 || len(got.Pools) != 0 || len(got.Algos) != 0 || got.AvgDifficulty != 0 {
+		t.Fatalf("expected zero-value stats on empty table, got %+v", got)
+	}
+}
+
+func TestRecentBlocksStats_RejectsNonPositiveLimit(t *testing.T) {
+	d := openTestDB(t)
+	ctx := context.Background()
+	if _, err := d.RecentBlocksStats(ctx, 0, nil); err == nil {
+		t.Fatal("expected error for limit 0")
 	}
 }
 
