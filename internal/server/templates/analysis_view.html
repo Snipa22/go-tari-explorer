@@ -6,7 +6,12 @@
     <label>From <input type="number" name="from" value="{{.Params.From}}" min="0" style="width:10rem;"></label>
     <label>To <input type="number" name="to" value="{{.Params.To}}" min="0" style="width:10rem;"></label>
     {{if .PoolField}}
-    <label>Pool <input type="text" name="pool" value="{{.Pool}}" style="width:10rem;"></label>
+    {{$pool := .Pool}}
+    <label>Pool <select name="pool" style="width:10rem;">
+        {{range .PoolOptions}}
+        <option value="{{.}}" {{if eq . $pool}}selected{{end}}>{{.}}</option>
+        {{end}}
+    </select></label>
     {{end}}
     <button type="submit">Update</button>
 </form>

@@ -43,12 +43,6 @@ func TestStackedAreaChart_ValidPNGWithExpectedDimensions(t *testing.T) {
 	}
 }
 
-func TestStackedAreaChart_NoPoints(t *testing.T) {
-	if _, err := StackedAreaChart(nil, []string{"a"}, "t", "x", "y"); err == nil {
-		t.Error("expected error for empty points, got nil")
-	}
-}
-
 func TestStackedAreaChart_NoSeries(t *testing.T) {
 	points := []Point{{X: 0, Series: map[string]float64{"a": 1}}}
 	if _, err := StackedAreaChart(points, nil, "t", "x", "y"); err == nil {
@@ -100,12 +94,6 @@ func TestLineChart_MultiSeries(t *testing.T) {
 	decodePNG(t, data)
 }
 
-func TestLineChart_NoPoints(t *testing.T) {
-	if _, err := LineChart(nil, []string{"a"}, "t", "x", "y"); err == nil {
-		t.Error("expected error for empty points, got nil")
-	}
-}
-
 func TestLineChart_NoSeries(t *testing.T) {
 	points := []Point{{X: 0, Series: map[string]float64{"a": 1}}}
 	if _, err := LineChart(points, nil, "t", "x", "y"); err == nil {
@@ -124,5 +112,127 @@ func TestSeriesValues_MissingKeyTreatedAsZero(t *testing.T) {
 		if got[i] != want[i] {
 			t.Errorf("seriesValues[%d] = %v, want %v", i, got[i], want[i])
 		}
+	}
+}
+
+// --- Fix 1 regression/coverage tests: <2 distinct X values must render a valid,
+// decodable placeholder PNG with no error, instead of erroring (which is what the
+// underlying go-chart library does/did - "zero x-range delta" - and which every
+// /analysis/*.png handler previously turned into a raw HTTP 500 for any caller whose
+// bucket_size/from/to query params collapsed the requested height range down this
+// far). The >=2-distinct-X path (already covered by the tests above) must be
+// unaffected by this change.
+
+func TestStackedAreaChart_NoPoints_RendersPlaceholderNotError(t *testing.T) {
+	data, err := StackedAreaChart(nil, []string{"a"}, "t", "x", "y")
+	if err != nil {
+		t.Fatalf("StackedAreaChart: expected no error for 0 points (placeholder path), got %v", err)
+	}
+	cfg := decodePNG(t, data)
+	if cfg.Width != DefaultWidth || cfg.Height != DefaultHeight {
+		t.Errorf("placeholder dimensions = %dx%d, want %dx%d", cfg.Width, cfg.Height, DefaultWidth, DefaultHeight)
+	}
+}
+
+func TestStackedAreaChart_SinglePoint_RendersPlaceholderNotError(t *testing.T) {
+	points := []Point{{X: 500, Series: map[string]float64{"a": 3}}}
+	data, err := StackedAreaChart(points, []string{"a"}, "t", "x", "y")
+	if err != nil {
+		t.Fatalf("StackedAreaChart: expected no error for 1 point (placeholder path), got %v", err)
+	}
+	decodePNG(t, data)
+}
+
+func TestStackedAreaChart_AllSameX_RendersPlaceholderNotError(t *testing.T) {
+	// Multiple points but all sharing one X value is the same "<2 distinct X"
+	// shape go-chart can't range an axis for, even though len(points) > 1.
+	points := []Point{
+		{X: 500, Series: map[string]float64{"a": 1}},
+		{X: 500, Series: map[string]float64{"a": 2}},
+	}
+	data, err := StackedAreaChart(points, []string{"a"}, "t", "x", "y")
+	if err != nil {
+		t.Fatalf("StackedAreaChart: expected no error for all-same-X points (placeholder path), got %v", err)
+	}
+	decodePNG(t, data)
+}
+
+func TestStackedAreaChart_NoPointsAndNoSeries_RendersPlaceholderNotError(t *testing.T) {
+	// Distinct from TestStackedAreaChart_NoPoints_RendersPlaceholderNotError (which
+	// passes a non-empty seriesOrder) and TestStackedAreaChart_NoSeries_StillErrors
+	// (which passes non-empty points): when there is genuinely nothing at all - e.g.
+	// internal/analysis.PoolShare's height range matched zero DB rows, so both points
+	// and seriesOrder came back empty - this must render the placeholder, not error.
+	data, err := StackedAreaChart(nil, nil, "t", "x", "y")
+	if err != nil {
+		t.Fatalf("StackedAreaChart: expected no error for 0 points and 0 series (placeholder path), got %v", err)
+	}
+	decodePNG(t, data)
+}
+
+func TestStackedAreaChart_NoSeries_StillErrors(t *testing.T) {
+	// Unrelated to the <2-distinct-X fix: no series names is still a caller
+	// programming error, not a "not enough data" shape, and must still error.
+	points := []Point{{X: 0, Series: map[string]float64{"a": 1}}}
+	if _, err := StackedAreaChart(points, nil, "t", "x", "y"); err == nil {
+		t.Error("expected error for empty series order, got nil")
+	}
+}
+
+func TestLineChart_NoPoints_RendersPlaceholderNotError(t *testing.T) {
+	data, err := LineChart(nil, []string{"a"}, "t", "x", "y")
+	if err != nil {
+		t.Fatalf("LineChart: expected no error for 0 points (placeholder path), got %v", err)
+	}
+	decodePNG(t, data)
+}
+
+func TestLineChart_SinglePoint_RendersPlaceholderNotError(t *testing.T) {
+	points := []Point{{X: 500, Series: map[string]float64{"avg difficulty": 42}}}
+	data, err := LineChart(points, []string{"avg difficulty"}, "Difficulty", "height", "difficulty")
+	if err != nil {
+		t.Fatalf("LineChart: expected no error for 1 point (placeholder path), got %v", err)
+	}
+	decodePNG(t, data)
+}
+
+func TestLineChart_NoPointsAndNoSeries_RendersPlaceholderNotError(t *testing.T) {
+	// Distinct from TestLineChart_NoPoints_RendersPlaceholderNotError (which passes a
+	// non-empty seriesOrder) and TestLineChart_NoSeries_StillErrors (which passes
+	// non-empty points): when there is genuinely nothing at all - e.g.
+	// internal/analysis.PoolShare's height range matched zero DB rows, so both points
+	// and seriesOrder came back empty - this must render the placeholder, not error.
+	data, err := LineChart(nil, nil, "t", "x", "y")
+	if err != nil {
+		t.Fatalf("LineChart: expected no error for 0 points and 0 series (placeholder path), got %v", err)
+	}
+	decodePNG(t, data)
+}
+
+func TestLineChart_NoSeries_StillErrors(t *testing.T) {
+	points := []Point{{X: 0, Series: map[string]float64{"a": 1}}}
+	if _, err := LineChart(points, nil, "t", "x", "y"); err == nil {
+		t.Error("expected error for empty series order, got nil")
+	}
+}
+
+func TestDistinctXCount(t *testing.T) {
+	cases := []struct {
+		name   string
+		points []Point
+		want   int
+	}{
+		{"nil", nil, 0},
+		{"one", []Point{{X: 1}}, 1},
+		{"two distinct", []Point{{X: 1}, {X: 2}}, 2},
+		{"two same", []Point{{X: 1}, {X: 1}}, 1},
+		{"three, two distinct", []Point{{X: 1}, {X: 2}, {X: 1}}, 2},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := distinctXCount(tc.points); got != tc.want {
+				t.Errorf("distinctXCount(%v) = %d, want %d", tc.points, got, tc.want)
+			}
+		})
 	}
 }

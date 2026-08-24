@@ -75,7 +75,18 @@ func main() {
 		log.Fatalf("server: %v", err)
 	}
 
-	httpSrv := &http.Server{Addr: *httpAddr, Handler: srv.Handler()}
+	httpSrv := &http.Server{
+		Addr:    *httpAddr,
+		Handler: srv.Handler(),
+		// Server-level timeouts, tunable via TARI_EXPLORER_HTTP_*_TIMEOUT (see
+		// internal/config) - bound how long a slow/malicious client can hold a
+		// connection open (Slowloris-class exposure), which matters now that this
+		// server is reachable from the public internet, not just an internal VLAN.
+		ReadHeaderTimeout: config.HTTPReadHeaderTimeout(),
+		ReadTimeout:       config.HTTPReadTimeout(),
+		WriteTimeout:      config.HTTPWriteTimeout(),
+		IdleTimeout:       config.HTTPIdleTimeout(),
+	}
 
 	go func() {
 		<-ctx.Done()

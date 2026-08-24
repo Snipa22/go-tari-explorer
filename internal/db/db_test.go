@@ -468,6 +468,61 @@ func TestRecentBlocksStats_RejectsNonPositiveLimit(t *testing.T) {
 	}
 }
 
+// seedBlockWithPoolTag inserts a minimal valid `blocks` row at height with poolTag set
+// (nil for a NULL pool_tag), for tests exercising pool_tag-based queries that
+// seedBlock's fixed "no pool tag" shape doesn't cover.
+func seedBlockWithPoolTag(t *testing.T, d *DB, height uint64, poolTag *string) {
+	t.Helper()
+	err := d.UpsertBlock(context.Background(), Block{
+		Height:            height,
+		Hash:              "aa",
+		PrevHash:          "bb",
+		OutputMr:          []byte{},
+		BlockOutputMr:     []byte{},
+		KernelMr:          []byte{},
+		InputMr:           []byte{},
+		TotalKernelOffset: []byte{},
+		TotalScriptOffset: []byte{},
+		ValidatorNodeMr:   []byte{},
+		PowData:           []byte{},
+		PowAlgo:           "RXM",
+		PoolTag:           poolTag,
+	})
+	if err != nil {
+		t.Fatalf("db: seed block %d with pool tag: %v", height, err)
+	}
+}
+
+// TestUnmappedPoolTags proves UnmappedPoolTags excludes both a pool_tag matching a
+// mapping's MatchPrefix (already folded into a canonical series, so not "unmapped")
+// and a NULL pool_tag (not a real pool tag at all), while including a real pool_tag
+// that matches no mapping entry.
+func TestUnmappedPoolTags(t *testing.T) {
+	d := openTestDB(t)
+	ctx := context.Background()
+
+	wufTag := "WUFJagtechE0"
+	unmappedTag := "pool.kryptex.com"
+	seedBlockWithPoolTag(t, d, 700, &wufTag)      // matches WUF mapping - must be excluded
+	seedBlockWithPoolTag(t, d, 701, &unmappedTag) // real, unmapped tag - must be included
+	seedBlockWithPoolTag(t, d, 702, nil)          // NULL pool_tag - must be excluded
+
+	mappings := []PoolTagMapping{{MatchPrefix: "WUF", CanonicalName: "Jagtech"}}
+	got, err := d.UnmappedPoolTags(ctx, mappings)
+	if err != nil {
+		t.Fatalf("UnmappedPoolTags: %v", err)
+	}
+	want := []string{unmappedTag}
+	if len(got) != len(want) {
+		t.Fatalf("UnmappedPoolTags: got %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("UnmappedPoolTags[%d]: got %q, want %q", i, got[i], want[i])
+		}
+	}
+}
+
 // bytesOf returns an n-byte slice filled with fill, for building distinct
 // fixture excess-sig/commitment values without hand-writing byte literals.
 func bytesOf(n int, fill byte) []byte {

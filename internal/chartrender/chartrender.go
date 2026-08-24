@@ -14,11 +14,15 @@ import (
 	"fmt"
 	"image"
 	"image/color"
+	"image/draw"
 	"image/png"
 	"sort"
 
 	chart "github.com/wcharczuk/go-chart/v2"
 	"github.com/wcharczuk/go-chart/v2/drawing"
+	"golang.org/x/image/font"
+	"golang.org/x/image/font/basicfont"
+	"golang.org/x/image/math/fixed"
 )
 
 // Point is one X-axis sample (typically a bucket-start block height) with a value per
@@ -79,6 +83,19 @@ func xValues(points []Point) []float64 {
 	return out
 }
 
+// distinctXCount returns the number of distinct X values across points. go-chart's
+// axis-ranging code divides by (max-x - min-x) internally, so anything below 2 distinct
+// X values (0 points, or every point sharing the same X) makes it error/panic with
+// "zero x-range delta; there needs to be at least (2) values" - see
+// notEnoughDataPNG's doc comment for how that case is handled instead of let through.
+func distinctXCount(points []Point) int {
+	seen := make(map[float64]struct{}, len(points))
+	for _, p := range points {
+		seen[p.X] = struct{}{}
+	}
+	return len(seen)
+}
+
 // renderPNG runs c.Render with the PNG renderer into a byte slice.
 func renderPNG(c chart.Chart) ([]byte, error) {
 	buf := bytes.NewBuffer(nil)
@@ -131,6 +148,123 @@ func legendStyle() chart.Style {
 	}
 }
 
+// notEnoughDataMessage is the placeholder text rendered by notEnoughDataPNG. Kept as a
+// package-level const so both callers (and tests) reference the exact same wording.
+const notEnoughDataMessage = "not enough data for this range - try a smaller bucket_size or wider from/to"
+
+// notEnoughDataPNG renders a plain, hand-drawn placeholder PNG (title + centered
+// message, on the same dark background as a real chart) using only stdlib
+// image/image-png plus golang.org/x/image's basicfont (already an indirect dependency
+// of this module via go-chart's own font handling, so this adds no new third-party
+// dependency) - deliberately not a real chart.Chart, since go-chart itself is what
+// can't render fewer than 2 distinct X values (see distinctXCount's doc comment).
+// This is the graceful fallback StackedAreaChart/LineChart use instead of erroring
+// (and therefore 500ing every /analysis/*.png endpoint) when a caller's
+// bucket_size/from/to query params collapse the requested height range down to fewer
+// than 2 buckets - a normal, user-triggerable input shape on a public read-only page,
+// not a programming error.
+func notEnoughDataPNG(title string) ([]byte, error) {
+	img := image.NewNRGBA(image.Rect(0, 0, DefaultWidth, DefaultHeight))
+	bg := color.NRGBA{R: 0x0f, G: 0x0f, B: 0x12, A: 255}
+	draw.Draw(img, img.Bounds(), &image.Uniform{C: bg}, image.Point{}, draw.Src)
+
+	canvasInset := 24
+	canvasRect := image.Rect(canvasInset, canvasInset, DefaultWidth-canvasInset, DefaultHeight-canvasInset)
+	canvasColor := color.NRGBA{R: 0x17, G: 0x17, B: 0x1b, A: 255}
+	draw.Draw(img, canvasRect, &image.Uniform{C: canvasColor}, image.Point{}, draw.Src)
+
+	titleColor := color.NRGBA{R: 0xe6, G: 0xe6, B: 0xe6, A: 255}
+	messageColor := color.NRGBA{R: 0xcc, G: 0xcc, B: 0xcc, A: 255}
+
+	drawCenteredText(img, title, DefaultHeight/2-30, titleColor)
+	drawWrappedCenteredText(img, notEnoughDataMessage, DefaultHeight/2, messageColor, 70)
+
+	buf := bytes.NewBuffer(nil)
+	if err := png.Encode(buf, img); err != nil {
+		return nil, fmt.Errorf("chartrender: encode placeholder png: %w", err)
+	}
+	return buf.Bytes(), nil
+}
+
+// basicFontFace is the fixed-width bitmap face used for all placeholder-PNG text -
+// golang.org/x/image/font/basicfont is already an indirect dependency of this module
+// (pulled in transitively via go-chart's font handling), so this adds no new
+// third-party dependency, just a direct import of something already in go.sum.
+var basicFontFace = basicfont.Face7x13
+
+// textWidth returns the pixel width basicFontFace renders s at.
+func textWidth(s string) int {
+	return len(s) * basicFontFace.Advance
+}
+
+// drawCenteredText draws s horizontally centered on img at the given baseline y using
+// golang.org/x/image/font's standard font.Drawer.
+func drawCenteredText(img draw.Image, s string, y int, c color.Color) {
+	x := (DefaultWidth - textWidth(s)) / 2
+	if x < 0 {
+		x = 0
+	}
+	d := &font.Drawer{
+		Dst:  img,
+		Src:  &image.Uniform{C: c},
+		Face: basicFontFace,
+		Dot:  fixed.P(x, y),
+	}
+	d.DrawString(s)
+}
+
+// drawWrappedCenteredText draws s centered at y, word-wrapping onto multiple centered
+// lines no wider than maxWidth characters each, one line height (13px) apart.
+func drawWrappedCenteredText(img draw.Image, s string, y int, c color.Color, maxWidth int) {
+	lines := wrapText(s, maxWidth)
+	const lineHeight = 16
+	start := y - (len(lines)-1)*lineHeight/2
+	for i, line := range lines {
+		drawCenteredText(img, line, start+i*lineHeight, c)
+	}
+}
+
+// wrapText greedily wraps s onto lines of at most maxWidth runes, breaking on spaces.
+func wrapText(s string, maxWidth int) []string {
+	words := splitWords(s)
+	if len(words) == 0 {
+		return []string{s}
+	}
+	var lines []string
+	cur := words[0]
+	for _, w := range words[1:] {
+		if len(cur)+1+len(w) > maxWidth {
+			lines = append(lines, cur)
+			cur = w
+			continue
+		}
+		cur += " " + w
+	}
+	lines = append(lines, cur)
+	return lines
+}
+
+// splitWords is a tiny space-splitter (avoiding a strings import elsewhere in this
+// file's minimal placeholder-rendering code path).
+func splitWords(s string) []string {
+	var words []string
+	var cur []byte
+	for i := 0; i < len(s); i++ {
+		if s[i] == ' ' {
+			if len(cur) > 0 {
+				words = append(words, string(cur))
+				cur = nil
+			}
+			continue
+		}
+		cur = append(cur, s[i])
+	}
+	if len(cur) > 0 {
+		words = append(words, string(cur))
+	}
+	return words
+}
+
 // StackedAreaChart renders points as a stacked-area PNG: for each X, the named series in
 // seriesOrder are drawn as cumulative bands stacked bottom-to-top in that order (so
 // seriesOrder[0] is the bottommost band), preserving each series' absolute value rather
@@ -149,12 +283,30 @@ func legendStyle() chart.Style {
 // stacked area chart where only the top-most band's true color remains visible between
 // each pair of cumulative lines. seriesOrder controls both stack order and legend/color
 // order; a series name not present in a given Point's map is treated as 0 (see Point).
+//
+// If points has fewer than 2 distinct X values (0 or 1 buckets - e.g. a caller's
+// bucket_size/from/to query params collapsed the requested height range down that far),
+// this renders a "not enough data" placeholder PNG instead of erroring - go-chart itself
+// cannot range an axis with fewer than 2 distinct X values, and that's a normal
+// user-triggerable input shape on a public page, not a caller bug. See notEnoughDataPNG.
+//
+// Similarly, if both points and seriesOrder are empty, there is genuinely nothing at all
+// to plot (e.g. internal/analysis.PoolShare's height range matched zero DB rows, so both
+// the point list and the totals-derived series list came back empty) - this is the same
+// "not enough data" shape as above, not a caller forgetting to pass seriesOrder, so it
+// also renders the placeholder rather than erroring. An empty seriesOrder alongside
+// non-empty points is still treated as a caller bug (see below) since real point data
+// with no series names to draw from it means the caller forgot to specify which series
+// to render, not that there's no data.
 func StackedAreaChart(points []Point, seriesOrder []string, title, xLabel, yLabel string) ([]byte, error) {
-	if len(points) == 0 {
-		return nil, fmt.Errorf("chartrender: stacked area chart: no points")
+	if len(points) == 0 && len(seriesOrder) == 0 {
+		return notEnoughDataPNG(title)
 	}
 	if len(seriesOrder) == 0 {
 		return nil, fmt.Errorf("chartrender: stacked area chart: no series")
+	}
+	if distinctXCount(points) < 2 {
+		return notEnoughDataPNG(title)
 	}
 
 	sorted := make([]Point, len(points))
@@ -200,12 +352,24 @@ func StackedAreaChart(points []Point, seriesOrder []string, title, xLabel, yLabe
 // LineChart renders points as a plain (non-stacked) multi-series line chart PNG, one line
 // per name in seriesOrder. Used for the block-time and difficulty analysis pages, which
 // each only need a single series, but this supports N for reuse/testability.
+//
+// If points has fewer than 2 distinct X values (0 or 1 buckets), this renders a "not
+// enough data" placeholder PNG instead of erroring - see StackedAreaChart's doc comment
+// above and notEnoughDataPNG for why.
+//
+// Likewise, if both points and seriesOrder are empty (genuinely nothing at all to plot,
+// as opposed to real point data with no series names - see StackedAreaChart's doc
+// comment above for the distinction), this also renders the placeholder rather than
+// erroring.
 func LineChart(points []Point, seriesOrder []string, title, xLabel, yLabel string) ([]byte, error) {
-	if len(points) == 0 {
-		return nil, fmt.Errorf("chartrender: line chart: no points")
+	if len(points) == 0 && len(seriesOrder) == 0 {
+		return notEnoughDataPNG(title)
 	}
 	if len(seriesOrder) == 0 {
 		return nil, fmt.Errorf("chartrender: line chart: no series")
+	}
+	if distinctXCount(points) < 2 {
+		return notEnoughDataPNG(title)
 	}
 
 	sorted := make([]Point, len(points))
