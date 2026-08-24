@@ -257,6 +257,31 @@ func Difficulty(ctx context.Context, database *db.DB, bucketSize, fromHeight, to
 	return points, AlgoOrder, nil
 }
 
+// FilterAlgo reduces a multi-series Difficulty result down to at most one algo's
+// values, for internal/server's per-algo difficulty PNG handler: RXM/RXT/C29/SHA3X
+// differ by orders of magnitude, so rendering all 4 on one shared linear Y-axis
+// visually crushes the lower-magnitude algo's line flat near zero even though its
+// underlying data is fine - the fix is 4 separate charts, each independently
+// Y-scaled, and this is the reshaping step that picks out just one algo's data for
+// one of those 4 charts.
+//
+// The returned Points have the same X values, same order, and same length as points -
+// only each Point's Series map is reduced. A bucket where algo was absent from the
+// original Series map (see Difficulty's doc comment on why that means "zero blocks for
+// that algo in that bucket", not "value 0") stays absent from the returned Point's
+// Series map too - never inserted as a synthetic 0.0.
+func FilterAlgo(points []chartrender.Point, algo string) []chartrender.Point {
+	out := make([]chartrender.Point, len(points))
+	for i, p := range points {
+		series := map[string]float64{}
+		if v, ok := p.Series[algo]; ok {
+			series[algo] = v
+		}
+		out[i] = chartrender.Point{X: p.X, Series: series}
+	}
+	return out
+}
+
 // PoolAlgoBreakdown loads db.AlgoBucketCountsForPool for [fromHeight, toHeight], scoped
 // to canonicalName via mappings (see db.PoolTagMapping / db.AlgoBucketCountsForPool),
 // and reshapes it into chartrender.Points using the same RXM/RXT/C29/SHA3X series shape

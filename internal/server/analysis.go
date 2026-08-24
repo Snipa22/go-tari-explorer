@@ -68,6 +68,21 @@ func (s *Server) parseAnalysisParams(r *http.Request) analysisParams {
 	return p
 }
 
+// parseDifficultyAlgo reads ?algo= from the request, defaulting to
+// analysis.AlgoOrder[0] when absent or not one of the known algo names - same
+// graceful-degrade philosophy as parseAnalysisParams's own doc comment (a bad/missing
+// param degrades to a sensible default rather than a 400, since this is a read-only
+// reporting page).
+func parseDifficultyAlgo(r *http.Request) string {
+	algo := r.URL.Query().Get("algo")
+	for _, a := range analysis.AlgoOrder {
+		if algo == a {
+			return algo
+		}
+	}
+	return analysis.AlgoOrder[0]
+}
+
 // handleAnalysisIndex serves the /analysis landing page: links to the 4 views.
 func (s *Server) handleAnalysisIndex(w http.ResponseWriter, r *http.Request) {
 	if err := s.analysisIndexTmpl.Execute(w, nil); err != nil {
@@ -92,6 +107,13 @@ type analysisViewData struct {
 	Error      string
 	Summary    *blockTimeSummaryView
 	Difficulty bool
+	// DifficultyCharts is set only by the difficulty view: one (algo name, img src)
+	// pair per analysis.AlgoOrder entry, each pointing at its own independently
+	// Y-scaled /analysis/difficulty.png?...&algo=X chart - see
+	// handleAnalysisDifficultyPNG's doc comment for why RXM/RXT/C29/SHA3X need 4
+	// separate charts rather than 1 shared-axis chart. The other 3 views leave this
+	// nil and keep using the single ImgSrc field above unchanged.
+	DifficultyCharts []difficultyChartView
 	// PoolField/Pool/PoolOptions are set only by the pool-algo-breakdown view, which
 	// needs an extra "pool" query param the other 4 analysis views don't have. Zero
 	// value (PoolField == false) hides the extra form field for every other view.
@@ -100,6 +122,20 @@ type analysisViewData struct {
 	PoolField   bool
 	Pool        string
 	PoolOptions []string
+}
+
+// difficultyChartView is one entry of analysisViewData.DifficultyCharts: one algo's
+// name plus the <img src> for its independently-Y-scaled PNG.
+type difficultyChartView struct {
+	Algo   string
+	ImgSrc template.URL
+}
+
+// difficultyAlgoImgSrc builds the `<img src>` value for one per-algo difficulty PNG,
+// extending imgSrc's params with the algo name - same pattern as
+// poolAlgoBreakdownImgSrc's pool-param extension below.
+func difficultyAlgoImgSrc(algo string, p analysisParams) template.URL {
+	return template.URL("/analysis/difficulty.png?" + p.String() + "&algo=" + template.URLQueryEscaper(algo))
 }
 
 // blockTimeSummaryView adapts db.BlockTimeSummaryRow for template rendering, pre-
@@ -182,6 +218,12 @@ func (s *Server) handleAnalysisBlockTime(w http.ResponseWriter, r *http.Request)
 func (s *Server) handleAnalysisDifficulty(w http.ResponseWriter, r *http.Request) {
 	p := s.parseAnalysisParams(r)
 	data := analysisViewData{Title: "Difficulty", ImgSrc: imgSrc("/analysis/difficulty.png", p), Params: p, Difficulty: true}
+	for _, algo := range analysis.AlgoOrder {
+		data.DifficultyCharts = append(data.DifficultyCharts, difficultyChartView{
+			Algo:   algo,
+			ImgSrc: difficultyAlgoImgSrc(algo, p),
+		})
+	}
 	// See handleAnalysisAlgoDistribution's comment above re: tooFewBucketsForChart.
 	if _, _, err := analysis.Difficulty(r.Context(), s.DB, p.BucketSize, p.From, p.To); err != nil {
 		log.Printf("server: analysis difficulty: %v", err)
@@ -300,26 +342,63 @@ func (s *Server) handleAnalysisBlockTimePNG(w http.ResponseWriter, r *http.Reque
 	writePNG(w, png, err, "analysis block time png")
 }
 
-// handleAnalysisDifficultyPNG renders the difficulty chart as 4 separate overlaid lines
-// (chartrender.LineChart), one per pow_algo, rather than a chartrender.StackedAreaChart
-// like AlgoDistribution/PoolShare/PoolAlgoBreakdown use. Those other views correctly
-// stack, because summing block COUNTS across algos gives a real, meaningful total block
-// count. Difficulty is not meaningfully additive the same way: RXM/RXT/C29/SHA3X
-// difficulties differ by orders of magnitude and measure entirely different,
-// non-comparable proof-of-work spaces, so summing them on top of each other would
-// produce a number with no real-world interpretation, and would visually crush the
-// smaller-magnitude algo's line into an unreadable sliver near the bottom of the stack.
-// 4 independent lines, each readable at its own natural scale, is the only correct
-// representation here.
+// handleAnalysisDifficultyPNG renders ONE algo's difficulty as its own independently
+// Y-scaled chartrender.LineChart (never a chartrender.StackedAreaChart like
+// AlgoDistribution/PoolShare/PoolAlgoBreakdown use - see below for why), selected via
+// the ?algo= query param (parseDifficultyAlgo, defaulting to analysis.AlgoOrder[0]).
+//
+// This calls analysis.Difficulty exactly once (same as before) and then filters down
+// to the requested algo via analysis.FilterAlgo, rather than adding a second/duplicate
+// DB query path for a single algo. It renders 1 algo per call rather than all 4 on one
+// shared axis because RXM/RXT/C29/SHA3X difficulties differ by orders of magnitude and
+// measure entirely different, non-comparable proof-of-work spaces: a single shared
+// linear Y-axis crushes the lower-magnitude algo's line visually flat near zero even
+// though its underlying data is fine, and summing them (as StackedAreaChart would) is
+// equally meaningless since they aren't additive. 4 independent per-algo charts, each
+// readable at its own natural scale - one <img> per algo on the HTML page, see
+// handleAnalysisDifficulty - is the only correct representation here.
 func (s *Server) handleAnalysisDifficultyPNG(w http.ResponseWriter, r *http.Request) {
 	p := s.parseAnalysisParams(r)
-	points, order, err := analysis.Difficulty(r.Context(), s.DB, p.BucketSize, p.From, p.To)
+	algo := parseDifficultyAlgo(r)
+	points, _, err := analysis.Difficulty(r.Context(), s.DB, p.BucketSize, p.From, p.To)
 	if err != nil {
 		writePNG(w, nil, err, "analysis difficulty png")
 		return
 	}
-	png, err := chartrender.LineChart(points, order, "Difficulty (avg per algo, hashrate proxy)", "block height", "difficulty")
+	title := fmt.Sprintf("Difficulty (%s, avg, hashrate proxy)", algo)
+	png, err := renderDifficultyAlgoPNG(points, algo, title)
 	writePNG(w, png, err, "analysis difficulty png")
+}
+
+// renderDifficultyAlgoPNG filters points (analysis.Difficulty's multi-series result)
+// down to algo via analysis.FilterAlgo and renders it as a single-series LineChart.
+//
+// If algo has genuinely ZERO data across the ENTIRE requested height range (every
+// bucket's filtered Series map is empty, not just one bucket - see
+// allBucketsEmptyForAlgo), this renders chartrender's shared "not enough data"
+// placeholder instead of a degenerate flat-zero-line chart: LineChart's own
+// <2-distinct-X guard doesn't catch this case, since the overall bucket set (across
+// all 4 algos) can easily have plenty of distinct X values even when this one
+// particular algo has none of its own. Split out as its own function so it's testable
+// with plain literal []chartrender.Point data, without needing a live DB.
+func renderDifficultyAlgoPNG(points []chartrender.Point, algo, title string) ([]byte, error) {
+	filtered := analysis.FilterAlgo(points, algo)
+	if allBucketsEmptyForAlgo(filtered) {
+		return chartrender.NotEnoughDataPNG(title)
+	}
+	return chartrender.LineChart(filtered, []string{algo}, title, "block height", "difficulty")
+}
+
+// allBucketsEmptyForAlgo reports whether every point in points (already filtered to a
+// single algo via analysis.FilterAlgo) has an empty Series map - i.e. that algo had
+// zero data across the entire requested height range, not just a gap in one bucket.
+func allBucketsEmptyForAlgo(points []chartrender.Point) bool {
+	for _, p := range points {
+		if len(p.Series) > 0 {
+			return false
+		}
+	}
+	return true
 }
 
 func (s *Server) handleAnalysisPoolAlgoBreakdownPNG(w http.ResponseWriter, r *http.Request) {

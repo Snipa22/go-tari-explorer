@@ -1,10 +1,14 @@
 package analysis
 
 import (
+	"bytes"
 	"context"
+	"image/png"
 	"os"
+	"reflect"
 	"testing"
 
+	"github.com/Snipa22/go-tari-explorer/internal/chartrender"
 	"github.com/Snipa22/go-tari-explorer/internal/db"
 )
 
@@ -407,5 +411,140 @@ func TestDifficulty(t *testing.T) {
 	}
 	if b1["RXM"] != 500 {
 		t.Errorf("bucket 1000 RXM avg difficulty = %v, want 500", b1["RXM"])
+	}
+}
+
+// TestFilterAlgo is a table-driven, no-DB unit test for FilterAlgo proving: (a)
+// filtering by one algo returns ONLY that algo's values, with zero cross-contamination
+// from other algos' values even when they differ by many orders of magnitude, and (b)
+// a bucket where the filtered algo had no data ends up with an empty Series map, not a
+// spurious 0.0 entry.
+func TestFilterAlgo(t *testing.T) {
+	// RXM ~1e11-scale, C29 ~1e4-scale - deliberately many orders of magnitude apart,
+	// so any accidental blending/leakage between the two would be unmistakable.
+	points := []chartrender.Point{
+		{X: 0, Series: map[string]float64{"RXM": 1.5e11, "RXT": 2.0e11, "C29": 12345, "SHA3X": 99}},
+		// RXM absent in this bucket - must stay absent after filtering, not become 0.
+		{X: 1000, Series: map[string]float64{"RXT": 3.0e11, "C29": 54321}},
+		{X: 2000, Series: map[string]float64{"RXM": 9.9e11}},
+	}
+
+	cases := []struct {
+		name string
+		algo string
+		want []map[string]float64
+	}{
+		{
+			name: "RXM",
+			algo: "RXM",
+			want: []map[string]float64{
+				{"RXM": 1.5e11},
+				{},
+				{"RXM": 9.9e11},
+			},
+		},
+		{
+			name: "C29",
+			algo: "C29",
+			want: []map[string]float64{
+				{"C29": 12345},
+				{"C29": 54321},
+				{},
+			},
+		},
+		{
+			name: "algo with no data anywhere",
+			algo: "SHA3X_NEVER_SEEN",
+			want: []map[string]float64{{}, {}, {}},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := FilterAlgo(points, tc.algo)
+			if len(got) != len(tc.want) {
+				t.Fatalf("len(got) = %d, want %d", len(got), len(tc.want))
+			}
+			for i := range got {
+				if got[i].X != points[i].X {
+					t.Errorf("point %d: X = %v, want %v (X/order must be unchanged)", i, got[i].X, points[i].X)
+				}
+				if !reflect.DeepEqual(got[i].Series, tc.want[i]) {
+					t.Errorf("point %d: Series = %+v, want %+v", i, got[i].Series, tc.want[i])
+				}
+				for other := range points[i].Series {
+					if other == tc.algo {
+						continue
+					}
+					if _, leaked := got[i].Series[other]; leaked {
+						t.Errorf("point %d: filtering by %q leaked unrelated algo %q into Series: %+v", i, tc.algo, other, got[i].Series)
+					}
+				}
+			}
+		})
+	}
+}
+
+// TestDifficulty_PerAlgoChartsIndependentlyRenderable is a DB-backed test proving the
+// end-to-end per-algo-chart shape works with real, varying data across multiple
+// buckets and orders-of-magnitude-different algos (RXM ~1e11-scale, SHA3X ~1e4-scale,
+// each following a real increasing-then-decreasing trend, not a flat line): both
+// algos' filtered points render to distinct, valid, non-trivial PNGs via
+// FilterAlgo + chartrender.LineChart, and neither is byte-identical to the other or to
+// chartrender's "not enough data" placeholder.
+func TestDifficulty_PerAlgoChartsIndependentlyRenderable(t *testing.T) {
+	database := setupTestDB(t)
+	ctx := context.Background()
+
+	// RXM: ~1e11-scale, rising then falling across 4 buckets.
+	seedBlock(t, database, 0, 1000, "RXM", 100_000_000_000, nil)
+	seedBlock(t, database, 1000, 1010, "RXM", 250_000_000_000, nil)
+	seedBlock(t, database, 2000, 1020, "RXM", 400_000_000_000, nil)
+	seedBlock(t, database, 3000, 1030, "RXM", 150_000_000_000, nil)
+	// SHA3X: ~1e4-scale, rising then falling across the same 4 buckets.
+	seedBlock(t, database, 0, 1040, "SHA3X", 5_000, nil)
+	seedBlock(t, database, 1000, 1050, "SHA3X", 20_000, nil)
+	seedBlock(t, database, 2000, 1060, "SHA3X", 45_000, nil)
+	seedBlock(t, database, 3000, 1070, "SHA3X", 12_000, nil)
+
+	points, _, err := Difficulty(ctx, database, 1000, 0, 3999)
+	if err != nil {
+		t.Fatalf("Difficulty: %v", err)
+	}
+	if len(points) != 4 {
+		t.Fatalf("len(points) = %d, want 4", len(points))
+	}
+
+	rxmPNG, err := chartrender.LineChart(FilterAlgo(points, "RXM"), []string{"RXM"}, "Difficulty (RXM, avg, hashrate proxy)", "block height", "difficulty")
+	if err != nil {
+		t.Fatalf("LineChart(RXM): %v", err)
+	}
+	sha3xPNG, err := chartrender.LineChart(FilterAlgo(points, "SHA3X"), []string{"SHA3X"}, "Difficulty (SHA3X, avg, hashrate proxy)", "block height", "difficulty")
+	if err != nil {
+		t.Fatalf("LineChart(SHA3X): %v", err)
+	}
+	placeholderPNG, err := chartrender.NotEnoughDataPNG("Difficulty (RXM, avg, hashrate proxy)")
+	if err != nil {
+		t.Fatalf("NotEnoughDataPNG: %v", err)
+	}
+
+	for name, data := range map[string][]byte{"RXM": rxmPNG, "SHA3X": sha3xPNG} {
+		if _, err := png.Decode(bytes.NewReader(data)); err != nil {
+			t.Errorf("%s PNG failed to decode: %v", name, err)
+		}
+		// An arbitrary but generous floor: a real 960x400 rendered line chart is
+		// comfortably larger than this; a degenerate/near-blank image would not be.
+		if len(data) < 500 {
+			t.Errorf("%s PNG suspiciously small (%d bytes), want a non-trivial real chart", name, len(data))
+		}
+	}
+	if bytes.Equal(rxmPNG, sha3xPNG) {
+		t.Error("RXM and SHA3X PNGs are byte-identical, want distinct per-algo charts")
+	}
+	if bytes.Equal(rxmPNG, placeholderPNG) {
+		t.Error("RXM PNG is byte-identical to the not-enough-data placeholder")
+	}
+	if bytes.Equal(sha3xPNG, placeholderPNG) {
+		t.Error("SHA3X PNG is byte-identical to the not-enough-data placeholder")
 	}
 }

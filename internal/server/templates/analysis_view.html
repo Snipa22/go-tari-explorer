@@ -28,11 +28,22 @@
 </div>
 {{end}}
 {{if .Difficulty}}
-<p style="color:#888;">Difficulty is used as a hashrate proxy - see doc comment on db.DifficultyBucketRow for why a literal hashrate figure isn't derivable from indexed data alone.</p>
+<p style="color:#888;">Difficulty is used as a hashrate proxy - see doc comment on db.DifficultyBucketRow for why a literal hashrate figure isn't derivable from indexed data alone. RXM/RXT/C29/SHA3X differ by orders of magnitude, so each algo gets its own independently-scaled chart below rather than one shared axis.</p>
 {{end}}
 {{if .PoolField}}
 <p style="color:#888;">Algo breakdown for the merged pool series named above (see internal/analysis.DefaultPoolTagMappings for the tag-family -> canonical-name mapping this pulls from).</p>
 {{end}}
+{{if .Difficulty}}
+<div class="glance-row">
+    {{range .DifficultyCharts}}
+    <div>
+        <h4>{{.Algo}}</h4>
+        <img src="{{.ImgSrc}}" alt="Difficulty ({{.Algo}}) chart" style="max-width:100%;">
+    </div>
+    {{end}}
+</div>
+{{else}}
 <img src="{{.ImgSrc}}" alt="{{.Title}} chart" style="max-width:100%;">
+{{end}}
 {{end}}
 {{end}}
