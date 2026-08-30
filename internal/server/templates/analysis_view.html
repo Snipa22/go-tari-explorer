@@ -34,5 +34,17 @@
 <p style="color:#888;">Algo breakdown for the merged pool series named above (see internal/analysis.DefaultPoolTagMappings for the tag-family -> canonical-name mapping this pulls from).</p>
 {{end}}
 <img src="{{.ImgSrc}}" alt="{{.Title}} chart" style="max-width:100%;">
+{{if .Table}}
+<table>
+    <thead>
+    <tr>{{range .Table.Columns}}<th>{{.}}</th>{{end}}</tr>
+    </thead>
+    <tbody>
+    {{range .Table.Rows}}
+    <tr><td>{{.Height}}</td>{{range .Values}}<td>{{.}}</td>{{end}}</tr>
+    {{end}}
+    </tbody>
+</table>
+{{end}}
 {{end}}
 {{end}}
