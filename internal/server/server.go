@@ -251,13 +251,49 @@ func (v algoCountRowView) AvgDifficultyDisplay() string {
 	return strconv.FormatFloat(v.AvgDifficulty, 'f', 2, 64)
 }
 
+// currentDifficultyView adapts a db.DifficultySnapshot (from db.LatestDifficultySnapshots)
+// for template rendering: fixed RXM/RXT/C29/SHA3X display order (matching
+// analysis.AlgoOrder, the same order the algo-distribution/difficulty charts use), with
+// algos that have no snapshot yet (difficulty-poller hasn't observed a block for them,
+// or hasn't run yet) simply omitted rather than shown as a fake zero.
+type currentDifficultyView struct {
+	db.DifficultySnapshot
+}
+
+// RecordedAtDisplay formats RecordedAt as a human-readable UTC timestamp, matching
+// poolStatsView's LastBlockFoundTimeDisplay/LastPaymentDisplay convention.
+func (v currentDifficultyView) RecordedAtDisplay() string {
+	return v.RecordedAt.UTC().Format("2006-01-02 15:04:05 UTC")
+}
+
+// newCurrentDifficultyView reorders db.LatestDifficultySnapshots' rows (which come back
+// in whatever order Postgres's DISTINCT ON groups algo values) into analysis.AlgoOrder,
+// dropping any algo not present in rows.
+func newCurrentDifficultyView(rows []db.DifficultySnapshot) []currentDifficultyView {
+	byAlgo := make(map[string]db.DifficultySnapshot, len(rows))
+	for _, r := range rows {
+		byAlgo[r.Algo] = r
+	}
+	out := make([]currentDifficultyView, 0, len(analysis.AlgoOrder))
+	for _, algo := range analysis.AlgoOrder {
+		if r, ok := byAlgo[algo]; ok {
+			out = append(out, currentDifficultyView{r})
+		}
+	}
+	return out
+}
+
 // handleBlocksList serves the front page: the paginated blocks table (unchanged from
-// before this feature) plus two new "at a glance" panels - a last-100-blocks pool/algo
-// breakdown (db.RecentBlocksStats, task 5a) and a live mempool-stats summary (task 5b,
-// the same GetMempoolStats numbers /mempool shows, condensed). Both panels degrade to
-// an inline error message rather than failing the whole page: a RecentBlocksStats
-// query error or an unconfigured/failing s.Node is not reason enough to 500 a page
-// whose main content (the blocks table) loaded fine.
+// before this feature) plus three "at a glance" panels - a last-100-blocks pool/algo
+// breakdown (db.RecentBlocksStats, task 5a), a live mempool-stats summary (task 5b, the
+// same GetMempoolStats numbers /mempool shows, condensed), and a per-algo "current
+// difficulty" panel (db.LatestDifficultySnapshots, populated by the separate
+// cmd/difficulty-poller process/internal/difficultypoller.Poller - NOT a query run
+// inline on every page render) showing the live difficulty target for the algo's
+// single most-recently-observed block, distinct from (and not lagged/smoothed like)
+// RecentBlocksStats' AvgDifficulty. All three panels degrade to an inline error message
+// rather than failing the whole page: a query error or an unconfigured/failing s.Node
+// is not reason enough to 500 a page whose main content (the blocks table) loaded fine.
 func (s *Server) handleBlocksList(w http.ResponseWriter, r *http.Request) {
 	blocks, err := s.DB.ListBlocks(r.Context(), math.MaxInt64, PageSize)
 	if err != nil {
@@ -267,11 +303,13 @@ func (s *Server) handleBlocksList(w http.ResponseWriter, r *http.Request) {
 	}
 
 	data := struct {
-		Blocks            []blockView
-		RecentStats       recentBlocksStatsView
-		RecentStatsError  string
-		MempoolStats      *mempoolStatsView
-		MempoolStatsError string
+		Blocks                 []blockView
+		RecentStats            recentBlocksStatsView
+		RecentStatsError       string
+		MempoolStats           *mempoolStatsView
+		MempoolStatsError      string
+		CurrentDifficulty      []currentDifficultyView
+		CurrentDifficultyError string
 	}{Blocks: toBlockViews(blocks)}
 
 	recentStats, err := s.DB.RecentBlocksStats(r.Context(), recentBlocksStatsSample, analysis.DefaultPoolTagMappings)
@@ -280,6 +318,14 @@ func (s *Server) handleBlocksList(w http.ResponseWriter, r *http.Request) {
 		data.RecentStatsError = "unable to load recent-blocks stats"
 	} else {
 		data.RecentStats = recentBlocksStatsView{recentStats}
+	}
+
+	currentDiff, err := s.DB.LatestDifficultySnapshots(r.Context())
+	if err != nil {
+		log.Printf("server: latest difficulty snapshots: %v", err)
+		data.CurrentDifficultyError = "unable to load current difficulty"
+	} else {
+		data.CurrentDifficulty = newCurrentDifficultyView(currentDiff)
 	}
 
 	if s.Node == nil {

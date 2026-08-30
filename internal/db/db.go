@@ -1215,6 +1215,113 @@ type RecentBlocksStats struct {
 	SampleCount int64
 }
 
+// CurrentDifficultyRow is one row of CurrentDifficultyPerAlgo's result: the single
+// most-recently-indexed block for one pow-algo, and the `difficulty` value it carries.
+// Because each of RXM/RXT/C29/SHA3X runs its own independent difficulty-adjustment
+// window (each is its own algo-specific chain of accepted blocks), the difficulty
+// stamped on that algo's latest block IS the live current target a miner on that algo
+// needs to hit right now - unlike AlgoCountRow.AvgDifficulty (RecentBlocksStats), which
+// smooths over the last N blocks across all algos and lags behind the live target.
+type CurrentDifficultyRow struct {
+	Algo       string
+	Difficulty int64
+	Height     int64
+}
+
+// CurrentDifficultyPerAlgo returns, for each pow-algo that has at least one indexed
+// block, the difficulty of that algo's single highest-height (most recently mined)
+// block - the live "current difficulty to find" per algo, as opposed to
+// RecentBlocksStats' lagging average over the last N blocks of all algos combined. One
+// query, one row per distinct pow_algo present in the blocks table (DISTINCT ON +
+// ORDER BY pow_algo, height DESC picks the max-height row per algo Postgres-side).
+// Algos with no indexed blocks simply don't appear in the result; callers that need a
+// fixed RXM/RXT/C29/SHA3X display order (e.g. matching analysis.AlgoOrder) should
+// reorder/pad the returned rows themselves.
+func (d *DB) CurrentDifficultyPerAlgo(ctx context.Context) ([]CurrentDifficultyRow, error) {
+	rows, err := d.Pool.Query(ctx, `
+		SELECT DISTINCT ON (pow_algo) pow_algo, difficulty, height
+		FROM blocks
+		ORDER BY pow_algo, height DESC
+	`)
+	if err != nil {
+		return nil, fmt.Errorf("db: current difficulty per algo: %w", err)
+	}
+	defer rows.Close()
+
+	var out []CurrentDifficultyRow
+	for rows.Next() {
+		var r CurrentDifficultyRow
+		if err := rows.Scan(&r.Algo, &r.Difficulty, &r.Height); err != nil {
+			return nil, fmt.Errorf("db: current difficulty per algo: scan: %w", err)
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
+// DifficultySnapshot is the row shape for the `difficulty_snapshots` table: one row
+// per (Algo, Height) pair actually observed by cmd/difficulty-poller
+// (internal/difficultypoller.Poller), which polls CurrentDifficultyPerAlgo above (a
+// cheap read of the already-indexed `blocks` table - no live base-node GRPC call) on a
+// short interval and upserts a new row only when an algo's latest height has actually
+// advanced. See migrations/0007_difficulty_snapshots.up.sql for the full rationale,
+// including why (unlike MempoolSnapshot) this table keeps one row per real block
+// rather than one row per poll tick.
+type DifficultySnapshot struct {
+	ID         int64
+	Algo       string
+	Height     int64
+	Difficulty int64
+	RecordedAt time.Time
+}
+
+// UpsertDifficultySnapshot inserts a new difficulty_snapshots row for s.Algo/s.Height,
+// or does nothing if a row for that exact (algo, height) pair already exists (ON
+// CONFLICT (algo, height) DO NOTHING - see the UNIQUE constraint in
+// migrations/0007_difficulty_snapshots.up.sql). Returns inserted=true only when a new
+// row was actually added, so callers (the poller's Tick, and its tests) can
+// distinguish "this is a new block for this algo" from "no change since last tick"
+// without a separate existence-check query.
+func (d *DB) UpsertDifficultySnapshot(ctx context.Context, s DifficultySnapshot) (inserted bool, err error) {
+	tag, err := d.Pool.Exec(ctx, `
+		INSERT INTO difficulty_snapshots (algo, height, difficulty, recorded_at)
+		VALUES ($1, $2, $3, $4)
+		ON CONFLICT (algo, height) DO NOTHING
+	`, s.Algo, s.Height, s.Difficulty, s.RecordedAt)
+	if err != nil {
+		return false, fmt.Errorf("db: upsert difficulty snapshot: %w", err)
+	}
+	return tag.RowsAffected() > 0, nil
+}
+
+// LatestDifficultySnapshots returns, for each algo present in difficulty_snapshots, the
+// row with the highest height (DISTINCT ON (algo) + ORDER BY algo, height DESC) - the
+// front page's "current difficulty per algo" stat cards read this rather than querying
+// `blocks` directly on every render, so that history survives in the table for later
+// use (see migrations/0007_difficulty_snapshots.up.sql) even though the *current*
+// value could technically be recomputed live from `blocks` each time.
+func (d *DB) LatestDifficultySnapshots(ctx context.Context) ([]DifficultySnapshot, error) {
+	rows, err := d.Pool.Query(ctx, `
+		SELECT DISTINCT ON (algo) id, algo, height, difficulty, recorded_at
+		FROM difficulty_snapshots
+		ORDER BY algo, height DESC
+	`)
+	if err != nil {
+		return nil, fmt.Errorf("db: latest difficulty snapshots: %w", err)
+	}
+	defer rows.Close()
+
+	var out []DifficultySnapshot
+	for rows.Next() {
+		var s DifficultySnapshot
+		if err := rows.Scan(&s.ID, &s.Algo, &s.Height, &s.Difficulty, &s.RecordedAt); err != nil {
+			return nil, fmt.Errorf("db: latest difficulty snapshots: scan: %w", err)
+		}
+		out = append(out, s)
+	}
+	return out, rows.Err()
+}
+
 // RecentBlocksStats computes the front-page pool/algo breakdown over the most recently
 // indexed `limit` blocks (ORDER BY height DESC LIMIT limit), in a single round trip to
 // Postgres: one CTE selects the candidate blocks (with pool_tag folded through
