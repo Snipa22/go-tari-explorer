@@ -220,17 +220,29 @@ func (s *Server) handleAnalysisBlockTime(w http.ResponseWriter, r *http.Request)
 	p := s.parseAnalysisParams(r)
 	data := analysisViewData{Title: "Block Time", ImgSrc: imgSrc("/analysis/block-time.png", p), Params: p}
 	// See handleAnalysisAlgoDistribution's comment above re: tooFewBucketsForChart.
-	points, summary, err := analysis.BlockTime(r.Context(), s.DB, p.BucketSize, p.From, p.To)
+	_, summary, err := analysis.BlockTime(r.Context(), s.DB, p.BucketSize, p.From, p.To)
 	if err != nil {
 		log.Printf("server: analysis block time: %v", err)
 		data.Error = "unable to load chart data"
 	} else {
 		v := newBlockTimeSummaryView(summary)
 		data.Summary = &v
-		// analysis.BlockTime has no []string order return - the series is
-		// implicitly named "block time (s)", matching the PNG's own
-		// chartrender.LineChart call below in handleAnalysisBlockTimePNG.
-		data.Table = newAnalysisTableView(points, []string{"block time (s)"}, false)
+		// The data table for this view needs the raw per-bucket
+		// mean/median/stddev/max rows, not the chart-shaped []chartrender.Point
+		// analysis.BlockTime returns above - so bucketRows is fetched via a
+		// second, explicit db.BlockTimeDeltaBuckets call, exactly parallel to how
+		// analysis.BlockTime itself gets its chart Point data. Same query
+		// executed twice (once for chart Points, once here for the table) is
+		// acceptable here and keeps analysis.BlockTime's chart-shaped contract
+		// clean, rather than growing its return signature to serve two shapes.
+		bucketRows, err := s.DB.BlockTimeDeltaBuckets(r.Context(), p.BucketSize, p.From, p.To)
+		if err != nil {
+			log.Printf("server: analysis block time: bucket rows: %v", err)
+			data.Error = "unable to load chart data"
+			data.Summary = nil
+		} else {
+			data.Table = newBlockTimeBucketTableView(bucketRows)
+		}
 	}
 	if err := s.analysisViewTmpl.Execute(w, data); err != nil {
 		log.Printf("server: render analysis block time: %v", err)
