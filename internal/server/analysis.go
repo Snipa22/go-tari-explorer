@@ -138,6 +138,10 @@ type analysisViewData struct {
 	Error      string
 	Summary    *blockTimeSummaryView
 	Difficulty bool
+	// Table is the per-bucket data table shown below the chart, populated only on
+	// success (left nil on error so the template's existing {{if .Error}} branch
+	// continues to work unchanged).
+	Table *analysisTableView
 	// PoolField/Pool/PoolOptions are set only by the pool-algo-breakdown view, which
 	// needs an extra "pool" query param the other 4 analysis views don't have. Zero
 	// value (PoolField == false) hides the extra form field for every other view.
@@ -186,9 +190,11 @@ func (s *Server) handleAnalysisAlgoDistribution(w http.ResponseWriter, r *http.R
 	// tooFewBucketsForChart is intentionally not checked here: that shape is not an
 	// error (the .png endpoint renders a graceful placeholder for it - see
 	// tooFewBucketsForChart's doc comment), so the HTML page renders normally too.
-	if _, _, err := analysis.AlgoDistribution(r.Context(), s.DB, p.BucketSize, p.From, p.To); err != nil {
+	if points, order, err := analysis.AlgoDistribution(r.Context(), s.DB, p.BucketSize, p.From, p.To); err != nil {
 		log.Printf("server: analysis algo distribution: %v", err)
 		data.Error = "unable to load chart data"
+	} else {
+		data.Table = newAnalysisTableView(points, order, true)
 	}
 	if err := s.analysisViewTmpl.Execute(w, data); err != nil {
 		log.Printf("server: render analysis algo distribution: %v", err)
@@ -199,9 +205,11 @@ func (s *Server) handleAnalysisPoolShare(w http.ResponseWriter, r *http.Request)
 	p := s.parseAnalysisParams(r)
 	data := analysisViewData{Title: "Pool Share", ImgSrc: imgSrc("/analysis/pool-share.png", p), Params: p}
 	// See handleAnalysisAlgoDistribution's comment above re: tooFewBucketsForChart.
-	if _, _, err := analysis.PoolShare(r.Context(), s.DB, p.BucketSize, p.From, p.To, analysis.DefaultTopPools, analysis.DefaultPoolTagMappings); err != nil {
+	if points, order, err := analysis.PoolShare(r.Context(), s.DB, p.BucketSize, p.From, p.To, analysis.DefaultTopPools, analysis.DefaultPoolTagMappings); err != nil {
 		log.Printf("server: analysis pool share: %v", err)
 		data.Error = "unable to load chart data"
+	} else {
+		data.Table = newAnalysisTableView(points, order, true)
 	}
 	if err := s.analysisViewTmpl.Execute(w, data); err != nil {
 		log.Printf("server: render analysis pool share: %v", err)
@@ -212,13 +220,17 @@ func (s *Server) handleAnalysisBlockTime(w http.ResponseWriter, r *http.Request)
 	p := s.parseAnalysisParams(r)
 	data := analysisViewData{Title: "Block Time", ImgSrc: imgSrc("/analysis/block-time.png", p), Params: p}
 	// See handleAnalysisAlgoDistribution's comment above re: tooFewBucketsForChart.
-	_, summary, err := analysis.BlockTime(r.Context(), s.DB, p.BucketSize, p.From, p.To)
+	points, summary, err := analysis.BlockTime(r.Context(), s.DB, p.BucketSize, p.From, p.To)
 	if err != nil {
 		log.Printf("server: analysis block time: %v", err)
 		data.Error = "unable to load chart data"
 	} else {
 		v := newBlockTimeSummaryView(summary)
 		data.Summary = &v
+		// analysis.BlockTime has no []string order return - the series is
+		// implicitly named "block time (s)", matching the PNG's own
+		// chartrender.LineChart call below in handleAnalysisBlockTimePNG.
+		data.Table = newAnalysisTableView(points, []string{"block time (s)"}, false)
 	}
 	if err := s.analysisViewTmpl.Execute(w, data); err != nil {
 		log.Printf("server: render analysis block time: %v", err)
@@ -229,9 +241,11 @@ func (s *Server) handleAnalysisDifficulty(w http.ResponseWriter, r *http.Request
 	p := s.parseAnalysisParams(r)
 	data := analysisViewData{Title: "Difficulty", ImgSrc: imgSrc("/analysis/difficulty.png", p), Params: p, Difficulty: true}
 	// See handleAnalysisAlgoDistribution's comment above re: tooFewBucketsForChart.
-	if _, _, err := analysis.Difficulty(r.Context(), s.DB, p.BucketSize, p.From, p.To); err != nil {
+	if points, order, err := analysis.Difficulty(r.Context(), s.DB, p.BucketSize, p.From, p.To); err != nil {
 		log.Printf("server: analysis difficulty: %v", err)
 		data.Error = "unable to load chart data"
+	} else {
+		data.Table = newAnalysisTableView(points, order, false)
 	}
 	if err := s.analysisViewTmpl.Execute(w, data); err != nil {
 		log.Printf("server: render analysis difficulty: %v", err)
@@ -285,7 +299,7 @@ func (s *Server) handleAnalysisPoolAlgoBreakdown(w http.ResponseWriter, r *http.
 	}
 	if pool == "" {
 		data.Error = "no pool specified and no default pool tag mapping configured"
-	} else if _, _, err := analysis.PoolAlgoBreakdown(r.Context(), s.DB, p.BucketSize, p.From, p.To, analysis.DefaultPoolTagMappings, pool); err != nil {
+	} else if points, order, err := analysis.PoolAlgoBreakdown(r.Context(), s.DB, p.BucketSize, p.From, p.To, analysis.DefaultPoolTagMappings, pool); err != nil {
 		// Note: a too-few-buckets result (bucket_size/from/to collapsing the range)
 		// is not an error here - analysis.PoolAlgoBreakdown only returns err on a
 		// real underlying query failure. The .png endpoint below renders a graceful
@@ -294,6 +308,8 @@ func (s *Server) handleAnalysisPoolAlgoBreakdown(w http.ResponseWriter, r *http.
 		// (placeholder image and all) for that case without any special-casing here.
 		log.Printf("server: analysis pool algo breakdown: %v", err)
 		data.Error = "unable to load chart data"
+	} else {
+		data.Table = newAnalysisTableView(points, order, true)
 	}
 	if err := s.analysisViewTmpl.Execute(w, data); err != nil {
 		log.Printf("server: render analysis pool algo breakdown: %v", err)

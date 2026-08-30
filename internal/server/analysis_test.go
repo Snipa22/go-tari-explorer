@@ -6,6 +6,7 @@ import (
 	"os"
 	"testing"
 
+	"github.com/Snipa22/go-tari-explorer/internal/chartrender"
 	"github.com/Snipa22/go-tari-explorer/internal/db"
 )
 
@@ -159,5 +160,112 @@ func TestParseAnalysisParams_ExplicitToOnly_FromStillDefaultsFromMaxHeight(t *te
 	}
 	if p.From != 40_000 {
 		t.Errorf("From = %d, want 40000 (still derived from MaxIndexedHeight)", p.From)
+	}
+}
+
+// TestNewAnalysisTableView_CountSeries proves count-series values (e.g. per-algo block
+// counts, as used by AlgoDistribution/PoolShare/PoolAlgoBreakdown) render as plain
+// integers with no decimal point at all, never "12.00" or "12.0".
+func TestNewAnalysisTableView_CountSeries(t *testing.T) {
+	points := []chartrender.Point{
+		{X: 1000, Series: map[string]float64{"RXM": 12, "RXT": 340, "C29": 0, "SHA3X": 7}},
+	}
+	order := []string{"RXM", "RXT", "C29", "SHA3X"}
+
+	view := newAnalysisTableView(points, order, true)
+
+	wantCols := []string{"Height", "RXM", "RXT", "C29", "SHA3X"}
+	if len(view.Columns) != len(wantCols) {
+		t.Fatalf("Columns = %v, want %v", view.Columns, wantCols)
+	}
+	for i, c := range wantCols {
+		if view.Columns[i] != c {
+			t.Errorf("Columns[%d] = %q, want %q", i, view.Columns[i], c)
+		}
+	}
+
+	if len(view.Rows) != 1 {
+		t.Fatalf("len(Rows) = %d, want 1", len(view.Rows))
+	}
+	row := view.Rows[0]
+	wantValues := []string{"12", "340", "0", "7"}
+	for i, want := range wantValues {
+		if row.Values[i] != want {
+			t.Errorf("Values[%d] = %q, want %q (no decimal point)", i, row.Values[i], want)
+		}
+	}
+}
+
+// TestNewAnalysisTableView_NonCountSeries proves non-count series values (difficulty,
+// block-time seconds) retain 2 decimal places via strconv.FormatFloat, matching the
+// existing AvgDifficultyDisplay/formatSecondsPtr convention.
+func TestNewAnalysisTableView_NonCountSeries(t *testing.T) {
+	points := []chartrender.Point{
+		{X: 5000, Series: map[string]float64{"block time (s)": 123.456}},
+	}
+	order := []string{"block time (s)"}
+
+	view := newAnalysisTableView(points, order, false)
+
+	if len(view.Rows) != 1 {
+		t.Fatalf("len(Rows) = %d, want 1", len(view.Rows))
+	}
+	got := view.Rows[0].Values[0]
+	want := "123.46"
+	if got != want {
+		t.Errorf("Values[0] = %q, want %q", got, want)
+	}
+}
+
+// TestNewAnalysisTableView_HeightAlwaysPlainInteger proves the bucket-start height
+// (Point.X) always renders as a plain integer string, with no decimal point, even
+// when float noise makes the input value slightly non-integral.
+func TestNewAnalysisTableView_HeightAlwaysPlainInteger(t *testing.T) {
+	points := []chartrender.Point{
+		{X: 324576.0000000001, Series: map[string]float64{}},
+	}
+
+	view := newAnalysisTableView(points, nil, true)
+
+	if len(view.Rows) != 1 {
+		t.Fatalf("len(Rows) = %d, want 1", len(view.Rows))
+	}
+	got := view.Rows[0].Height
+	want := "324576"
+	if got != want {
+		t.Errorf("Height = %q, want %q", got, want)
+	}
+}
+
+// TestNewAnalysisTableView_EmptyPoints proves an empty points slice never panics and
+// produces a sane header-only result (zero data rows).
+func TestNewAnalysisTableView_EmptyPoints(t *testing.T) {
+	view := newAnalysisTableView(nil, []string{"RXM", "RXT"}, true)
+
+	if view == nil {
+		t.Fatal("newAnalysisTableView returned nil for empty points")
+	}
+	if len(view.Rows) != 0 {
+		t.Errorf("len(Rows) = %d, want 0", len(view.Rows))
+	}
+	wantCols := []string{"Height", "RXM", "RXT"}
+	if len(view.Columns) != len(wantCols) {
+		t.Fatalf("Columns = %v, want %v", view.Columns, wantCols)
+	}
+}
+
+// TestNewAnalysisTableView_EmptyPointsAndOrder proves an empty order slice (alongside
+// empty points) also never panics, producing just the "Height" column.
+func TestNewAnalysisTableView_EmptyPointsAndOrder(t *testing.T) {
+	view := newAnalysisTableView(nil, nil, false)
+
+	if view == nil {
+		t.Fatal("newAnalysisTableView returned nil for empty points/order")
+	}
+	if len(view.Rows) != 0 {
+		t.Errorf("len(Rows) = %d, want 0", len(view.Rows))
+	}
+	if len(view.Columns) != 1 || view.Columns[0] != "Height" {
+		t.Errorf("Columns = %v, want [\"Height\"]", view.Columns)
 	}
 }
