@@ -92,6 +92,15 @@ func TestAttribute_KnownTags(t *testing.T) {
 		{"supportxtm c29 truncates trailing bytes", 3, "supportxtm-c29-worker07\x00\x01", "supportxtm-c29", true, PowAlgoC29, ReasonOK},
 		{"supportxtm rxt truncates trailing bytes", 2, "supportxtm-rxt-worker07\x00\x01", "supportxtm-rxt", true, PowAlgoRXT, ReasonOK},
 		{"supportxtm rxm truncates trailing bytes", 0, "supportxtm-rxm-worker07\x00\x01", "supportxtm-rxm", true, PowAlgoRXM, ReasonOK},
+		// GCPOOL-SOLO is go-crypto-pool's legacy pre-algo-aware default tag, folding
+		// into the same "SupportXTM" canonicalName as supportxtm-* above; it truncates
+		// trailing worker-id/nonce-buffer noise exactly the same way.
+		{"gcpool-solo truncates trailing bytes", 0, "GCPOOL-SOLO\x00\x01worker03", "GCPOOL-SOLO", true, PowAlgoRXM, ReasonOK},
+		// Exactly 11 bytes with nothing appended must clamp to len(extra) without
+		// dropping any real bytes - exercises truncatePoolTag's exact-length (no
+		// garbage) boundary case explicitly, mirroring "own pool shorter than tag
+		// length" above.
+		{"gcpool-solo exact length", 0, "GCPOOL-SOLO", "GCPOOL-SOLO", true, PowAlgoRXM, ReasonOK},
 	}
 
 	for _, c := range cases {
