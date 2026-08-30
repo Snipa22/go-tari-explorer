@@ -632,6 +632,154 @@ func TestDifficultyBucketAvg_ZeroBlocksIsNil(t *testing.T) {
 	}
 }
 
+// TestBlocksInHeightRange proves BlocksInHeightRange returns exactly the height-bounded,
+// ascending-ordered candidate rows cmd/reattribute needs (height/pow_algo_raw/pool_tag/
+// output_count), and that it doesn't return blocks outside the requested range.
+func TestBlocksInHeightRange(t *testing.T) {
+	d := openTestDB(t)
+	ctx := context.Background()
+
+	jagtech := "WUFJagtechE0"
+	err := d.UpsertBlock(ctx, Block{
+		Height:            1000,
+		Hash:              "aa",
+		PrevHash:          "bb",
+		OutputMr:          []byte{},
+		BlockOutputMr:     []byte{},
+		KernelMr:          []byte{},
+		InputMr:           []byte{},
+		TotalKernelOffset: []byte{},
+		TotalScriptOffset: []byte{},
+		ValidatorNodeMr:   []byte{},
+		PowData:           []byte{},
+		PowAlgo:           "RXM",
+		PowAlgoRaw:        0,
+		PoolTag:           &jagtech,
+		OutputCount:       3,
+	})
+	if err != nil {
+		t.Fatalf("UpsertBlock: %v", err)
+	}
+	seedBlock(t, d, 1001) // PowAlgoRaw/PoolTag/OutputCount default zero values
+	seedBlock(t, d, 2000) // outside the [1000,1001] range queried below
+
+	got, err := d.BlocksInHeightRange(ctx, 1000, 1001)
+	if err != nil {
+		t.Fatalf("BlocksInHeightRange: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("expected 2 candidates, got %d: %+v", len(got), got)
+	}
+	if got[0].Height != 1000 || got[0].PowAlgoRaw != 0 || got[0].OutputCount != 3 {
+		t.Errorf("candidate 0 mismatch: %+v", got[0])
+	}
+	if got[0].PoolTag == nil || *got[0].PoolTag != jagtech {
+		t.Errorf("candidate 0 pool tag mismatch: %+v", got[0].PoolTag)
+	}
+	if got[1].Height != 1001 || got[1].PoolTag != nil || got[1].OutputCount != 0 {
+		t.Errorf("candidate 1 mismatch: %+v", got[1])
+	}
+}
+
+// TestCoinbaseExtraForHeightRange proves the method returns a block_height ->
+// coinbase_extra map built only from output_type = 1 (COINBASE) rows, ignores
+// non-coinbase output rows, excludes heights outside the requested range, and (per its
+// doc comment) keeps the first COINBASE row seen when a height has more than one.
+func TestCoinbaseExtraForHeightRange(t *testing.T) {
+	d := openTestDB(t)
+	ctx := context.Background()
+	seedBlock(t, d, 100)
+	seedBlock(t, d, 101)
+	seedBlock(t, d, 102)
+	seedBlock(t, d, 999) // outside range
+
+	// Height 100: one coinbase output plus one standard output - only the coinbase
+	// extra should end up in the map.
+	if err := d.ReplaceOutputsForBlock(ctx, 100, []Output{
+		{Index: 0, OutputType: 1, CoinbaseExtra: []byte("WUFJagtechE0"), Commitment: bytesOf(33, 0x01)},
+		{Index: 1, OutputType: 0, Commitment: bytesOf(33, 0x02)},
+	}); err != nil {
+		t.Fatalf("ReplaceOutputsForBlock 100: %v", err)
+	}
+	// Height 101: no coinbase output at all.
+	if err := d.ReplaceOutputsForBlock(ctx, 101, []Output{
+		{Index: 0, OutputType: 0, Commitment: bytesOf(33, 0x03)},
+	}); err != nil {
+		t.Fatalf("ReplaceOutputsForBlock 101: %v", err)
+	}
+	// Height 102: no outputs at all.
+
+	// Height 999 (outside the queried range): has its own coinbase output that must
+	// never show up in a query bounded to [100,102].
+	if err := d.ReplaceOutputsForBlock(ctx, 999, []Output{
+		{Index: 0, OutputType: 1, CoinbaseExtra: []byte("OutOfRange"), Commitment: bytesOf(33, 0x04)},
+	}); err != nil {
+		t.Fatalf("ReplaceOutputsForBlock 999: %v", err)
+	}
+
+	got, err := d.CoinbaseExtraForHeightRange(ctx, 100, 102)
+	if err != nil {
+		t.Fatalf("CoinbaseExtraForHeightRange: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("expected exactly 1 entry, got %d: %+v", len(got), got)
+	}
+	if string(got[100]) != "WUFJagtechE0" {
+		t.Errorf("height 100 coinbase extra mismatch: got %q", got[100])
+	}
+	if _, ok := got[101]; ok {
+		t.Errorf("height 101 (no coinbase output) should not be present in map")
+	}
+	if _, ok := got[999]; ok {
+		t.Errorf("height 999 (outside queried range) should not be present in map")
+	}
+}
+
+// TestSetPoolTag proves SetPoolTag updates just the pool_tag column for the given
+// height, leaving other blocks untouched, and that it can set pool_tag back to nil
+// (NULL) as well as to a new value.
+func TestSetPoolTag(t *testing.T) {
+	d := openTestDB(t)
+	ctx := context.Background()
+
+	original := "OldTag"
+	seedBlockWithPoolTag(t, d, 1200, &original)
+	seedBlockWithPoolTag(t, d, 1201, nil)
+
+	newTag := "NewTag"
+	if err := d.SetPoolTag(ctx, 1200, &newTag); err != nil {
+		t.Fatalf("SetPoolTag (set value): %v", err)
+	}
+	got, err := d.GetBlock(ctx, 1200)
+	if err != nil {
+		t.Fatalf("GetBlock: %v", err)
+	}
+	if got.PoolTag == nil || *got.PoolTag != newTag {
+		t.Errorf("expected pool_tag %q, got %+v", newTag, got.PoolTag)
+	}
+
+	// The other block must be untouched.
+	other, err := d.GetBlock(ctx, 1201)
+	if err != nil {
+		t.Fatalf("GetBlock 1201: %v", err)
+	}
+	if other.PoolTag != nil {
+		t.Errorf("expected height 1201's pool_tag to remain nil, got %+v", other.PoolTag)
+	}
+
+	// Setting back to nil must clear it (not error, not a no-op).
+	if err := d.SetPoolTag(ctx, 1200, nil); err != nil {
+		t.Fatalf("SetPoolTag (clear): %v", err)
+	}
+	got, err = d.GetBlock(ctx, 1200)
+	if err != nil {
+		t.Fatalf("GetBlock after clear: %v", err)
+	}
+	if got.PoolTag != nil {
+		t.Errorf("expected pool_tag nil after clear, got %+v", got.PoolTag)
+	}
+}
+
 // bytesOf returns an n-byte slice filled with fill, for building distinct
 // fixture excess-sig/commitment values without hand-writing byte literals.
 func bytesOf(n int, fill byte) []byte {

@@ -13,6 +13,7 @@ import (
 	"embed"
 	"fmt"
 	"io/fs"
+	"log"
 	"sort"
 	"strings"
 	"time"
@@ -278,6 +279,100 @@ func (d *DB) MaxIndexedHeight(ctx context.Context) (uint64, error) {
 		return 0, nil
 	}
 	return *max, nil
+}
+
+// ReattributionCandidate is the narrow row shape cmd/reattribute needs to recompute a
+// block's pool_tag without pulling the full Block row (see BlocksInHeightRange) - just
+// enough to call poolattr.Attribute (PowAlgoRaw, OutputCount) plus the block's
+// currently-stored PoolTag to diff the recomputed result against.
+type ReattributionCandidate struct {
+	Height      uint64
+	PowAlgoRaw  uint64
+	PoolTag     *string
+	OutputCount int32
+}
+
+// reattributionCandidateColumns/scanReattributionCandidateRow mirror
+// blockColumns/scanBlockRow's pattern above, but for BlocksInHeightRange's narrower
+// column set.
+const reattributionCandidateColumns = `height, pow_algo_raw, pool_tag, output_count`
+
+func scanReattributionCandidateRow(row pgx.Row, c *ReattributionCandidate) error {
+	return row.Scan(&c.Height, &c.PowAlgoRaw, &c.PoolTag, &c.OutputCount)
+}
+
+// BlocksInHeightRange returns every block in [fromHeight, toHeight] (inclusive),
+// ordered by height ascending, with just the columns cmd/reattribute needs to recompute
+// pool_tag - deliberately narrower than GetBlock/ListBlocks (which scan the entire
+// Block struct) since that tool never touches any other column.
+func (d *DB) BlocksInHeightRange(ctx context.Context, fromHeight, toHeight uint64) ([]ReattributionCandidate, error) {
+	rows, err := d.Pool.Query(ctx, `
+		SELECT `+reattributionCandidateColumns+`
+		FROM blocks
+		WHERE height BETWEEN $1 AND $2
+		ORDER BY height ASC
+	`, fromHeight, toHeight)
+	if err != nil {
+		return nil, fmt.Errorf("db: blocks in height range: %w", err)
+	}
+	defer rows.Close()
+
+	var out []ReattributionCandidate
+	for rows.Next() {
+		var c ReattributionCandidate
+		if err := scanReattributionCandidateRow(rows, &c); err != nil {
+			return nil, fmt.Errorf("db: blocks in height range: scan: %w", err)
+		}
+		out = append(out, c)
+	}
+	return out, rows.Err()
+}
+
+// CoinbaseExtraForHeightRange returns a map of block_height -> coinbase_extra for every
+// COINBASE (output_type = 1, see migrations/0003_kernels_outputs.up.sql's output_type
+// comment) output row in [fromHeight, toHeight], in a single query per batch rather
+// than one query per block - cmd/reattribute is the only caller, and it needs this for
+// every block in a batch at once to avoid an N+1 query pattern. There should be at most
+// one coinbase output per block; if a height surprisingly has more than one, the first
+// one seen wins and a warning is logged rather than crashing - this mirrors
+// internal/indexer.indexBlock's own "first coinbase output found, break" loop.
+func (d *DB) CoinbaseExtraForHeightRange(ctx context.Context, fromHeight, toHeight uint64) (map[uint64][]byte, error) {
+	rows, err := d.Pool.Query(ctx, `
+		SELECT block_height, coinbase_extra
+		FROM outputs
+		WHERE output_type = 1 AND block_height BETWEEN $1 AND $2
+	`, fromHeight, toHeight)
+	if err != nil {
+		return nil, fmt.Errorf("db: coinbase extra for height range: %w", err)
+	}
+	defer rows.Close()
+
+	out := make(map[uint64][]byte)
+	for rows.Next() {
+		var height uint64
+		var extra []byte
+		if err := rows.Scan(&height, &extra); err != nil {
+			return nil, fmt.Errorf("db: coinbase extra for height range: scan: %w", err)
+		}
+		if _, seen := out[height]; seen {
+			log.Printf("db: coinbase extra for height range: height %d has more than one COINBASE output row; keeping the first one seen", height)
+			continue
+		}
+		out[height] = extra
+	}
+	return out, rows.Err()
+}
+
+// SetPoolTag updates just the pool_tag column for a single block, keyed on height.
+// Deliberately narrower than UpsertBlock (which would require - and overwrite - every
+// other column on the row); used by cmd/reattribute, which only ever needs to touch
+// this one derived column.
+func (d *DB) SetPoolTag(ctx context.Context, height uint64, poolTag *string) error {
+	_, err := d.Pool.Exec(ctx, `UPDATE blocks SET pool_tag = $1 WHERE height = $2`, poolTag, height)
+	if err != nil {
+		return fmt.Errorf("db: set pool tag for block %d: %w", height, err)
+	}
+	return nil
 }
 
 // Kernel is the row shape for the `kernels` table: one row per
