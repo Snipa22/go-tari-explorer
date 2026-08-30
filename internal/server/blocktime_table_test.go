@@ -45,8 +45,8 @@ func TestNewBlockTimeBucketTableView_AllStatsPresent(t *testing.T) {
 		t.Fatalf("len(Rows) = %d, want 1", len(view.Rows))
 	}
 	row := view.Rows[0]
-	if row.Height != "5000" {
-		t.Errorf("Height = %q, want %q", row.Height, "5000")
+	if row.Height != "5,000" {
+		t.Errorf("Height = %q, want %q", row.Height, "5,000")
 	}
 	wantValues := []string{"20.50", "18.25", "4.13", "60", "42"}
 	if len(row.Values) != len(wantValues) {
@@ -82,8 +82,8 @@ func TestNewBlockTimeBucketTableView_NilStats(t *testing.T) {
 		t.Fatalf("len(Rows) = %d, want 1", len(view.Rows))
 	}
 	row := view.Rows[0]
-	if row.Height != "9000" {
-		t.Errorf("Height = %q, want %q", row.Height, "9000")
+	if row.Height != "9,000" {
+		t.Errorf("Height = %q, want %q", row.Height, "9,000")
 	}
 	wantValues := []string{"n/a", "n/a", "n/a", "n/a", "0"}
 	if len(row.Values) != len(wantValues) {
