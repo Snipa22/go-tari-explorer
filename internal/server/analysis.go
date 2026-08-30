@@ -40,32 +40,78 @@ func (p analysisParams) String() string {
 // zero-args behavior.
 const defaultAnalysisToHeight = 1_000_000
 
+// defaultAnalysisWindowBlocks is how many blocks back from the highest currently-
+// indexed height the "from" default covers when the caller doesn't specify ?from= -
+// full-history charts get visually unreadable as the chain grows, so the default view
+// is a recent window instead. Explicit ?from= still overrides this completely.
+const defaultAnalysisWindowBlocks = 10_000
+
 // parseAnalysisParams reads bucket_size/from/to from the request's query string,
-// defaulting bucket_size to analysis.DefaultBucketSize, from to 0, and to to the
-// highest currently-indexed block height (or defaultAnalysisToHeight if the table is
-// empty). Malformed numeric params are silently treated as absent (fall back to the
-// default) rather than producing a 400 - this is a read-only reporting page, not a
-// form that mutates state, so a bad param degrading gracefully is preferable to erroring.
+// defaulting bucket_size to analysis.DefaultBucketSize, from to
+// max(0, highest-indexed-height - defaultAnalysisWindowBlocks) (i.e. the last ~10,000
+// indexed blocks, or 0 if the table is empty/errored/shorter than that window), and to
+// to the highest currently-indexed block height (or defaultAnalysisToHeight if the
+// table is empty). Malformed numeric params are silently treated as absent (fall back
+// to the default) rather than producing a 400 - this is a read-only reporting page,
+// not a form that mutates state, so a bad param degrading gracefully is preferable to
+// erroring.
 func (s *Server) parseAnalysisParams(r *http.Request) analysisParams {
 	q := r.URL.Query()
 	p := analysisParams{BucketSize: analysis.DefaultBucketSize}
 	if v, err := strconv.ParseUint(q.Get("bucket_size"), 10, 64); err == nil && v > 0 {
 		p.BucketSize = v
 	}
-	if v, err := strconv.ParseUint(q.Get("from"), 10, 64); err == nil {
-		p.From = v
+
+	fromV, fromErr := strconv.ParseUint(q.Get("from"), 10, 64)
+	fromAbsent := fromErr != nil
+	toV, toErr := strconv.ParseUint(q.Get("to"), 10, 64)
+	toAbsent := toErr != nil || toV == 0
+
+	if !fromAbsent {
+		p.From = fromV
 	}
-	if v, err := strconv.ParseUint(q.Get("to"), 10, 64); err == nil && v > 0 {
-		p.To = v
-	} else {
+
+	if toAbsent {
+		// Common case: whether or not from is also absent, we need MaxIndexedHeight
+		// for to's default here - so from's default (when also absent) can share
+		// this exact call instead of querying a second time.
 		max, err := s.DB.MaxIndexedHeight(r.Context())
 		if err != nil || max == 0 {
 			p.To = defaultAnalysisToHeight
+			if fromAbsent {
+				p.From = 0
+			}
 		} else {
 			p.To = max
+			if fromAbsent {
+				p.From = defaultAnalysisFrom(max)
+			}
+		}
+	} else {
+		p.To = toV
+		if fromAbsent {
+			// to was explicit, so the above branch's shared MaxIndexedHeight call
+			// didn't happen - from's default still needs its own call here.
+			max, err := s.DB.MaxIndexedHeight(r.Context())
+			if err != nil || max == 0 {
+				p.From = 0
+			} else {
+				p.From = defaultAnalysisFrom(max)
+			}
 		}
 	}
+
 	return p
+}
+
+// defaultAnalysisFrom computes the default "from" height given the highest currently-
+// indexed block height: max(0, maxHeight - defaultAnalysisWindowBlocks), avoiding
+// uint64 underflow when maxHeight is less than the window size.
+func defaultAnalysisFrom(maxHeight uint64) uint64 {
+	if maxHeight < defaultAnalysisWindowBlocks {
+		return 0
+	}
+	return maxHeight - defaultAnalysisWindowBlocks
 }
 
 // handleAnalysisIndex serves the /analysis landing page: links to the 4 views.
