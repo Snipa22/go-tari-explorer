@@ -134,12 +134,34 @@ type ownPoolTag struct {
 // tagLen rather than sharing one - a single shared tagLen (e.g. the longest, 16)
 // would include 2 bytes of the following nonce buffer as garbage on the three
 // 14-byte variants instead of stopping exactly at the real tag boundary.
+//
+// GCPOOL-SOLO (canonicalName "SupportXTM"): go-crypto-pool's ORIGINAL hardcoded
+// default coinbase-extra tag, predating the algo-aware supportxtm-<algo> defaults
+// documented directly above. internal/leaflib/solo/node.go's doc comment on
+// GRPCNodeClient.coinbaseExtraTag says the field is "Runtime-configurable per-process
+// (was formerly a single hardcoded package-level "GCPOOL-SOLO" constant) so
+// cmd/leaf-solo can set it to a per-algo default (e.g. "supportxtm-sha3x")" - i.e.
+// GCPOOL-SOLO isn't a third-party pool, it's an OLDER GENERATION of the exact same
+// own-pool infrastructure that now emits supportxtm-<algo> tags: same infra, same
+// operator, just a legacy tag format from before leaf-solo became configurable. It
+// folds into the same canonicalName "SupportXTM" as the current supportxtm-* tags
+// (not a separate name) for exactly that reason, so historical and current blocks
+// from this infra group together on the pool-share/algo-breakdown charts. The literal
+// string "GCPOOL-SOLO" is exactly 11 bytes, and (per live testnet DB analysis) real
+// historical coinbase_extra values for this tag are always exactly that 11-byte
+// string with no legitimate suffix - anything past byte 11 is garbage/nonce-buffer
+// noise from the block, the exact same suffix-garbage-truncation problem WUF and
+// supportxtm-* had before being added to this table (confirmed: 35 distinct
+// fragmented pool_tag rows in the live testnet blocks table, e.g. "GCPOOL-SOLO&",
+// "GCPOOL-SOLO*fes", "GCPOOL-SOLO+N", etc., all collapsing to the one real 11-byte
+// tag once truncated here).
 var ownPoolTags = []ownPoolTag{
 	{prefix: "WUF", tagLen: 12, canonicalName: "Jagtech"},
 	{prefix: "supportxtm-sha3x", tagLen: 16, canonicalName: "SupportXTM"},
 	{prefix: "supportxtm-c29", tagLen: 14, canonicalName: "SupportXTM"},
 	{prefix: "supportxtm-rxt", tagLen: 14, canonicalName: "SupportXTM"},
 	{prefix: "supportxtm-rxm", tagLen: 14, canonicalName: "SupportXTM"},
+	{prefix: "GCPOOL-SOLO", tagLen: 11, canonicalName: "SupportXTM"},
 }
 
 // prefixTable is the cleaned-up replacement for the original CLI's chain of

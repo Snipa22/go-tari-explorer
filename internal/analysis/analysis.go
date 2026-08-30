@@ -62,9 +62,20 @@ const DefaultTopPools = 8
 // would have appended whatever variable-length worker-id/nonce-buffer garbage
 // followed the tag, fragmenting this prefix into many spurious distinct pool_tag
 // values the same way WUF's doc comment above describes almost happening for WUF.
+//
+// GCPOOL-SOLO -> "SupportXTM": a third own-pool prefix, folding into the SAME
+// canonicalName as supportxtm- above rather than getting its own - it's
+// go-crypto-pool's legacy pre-algo-aware default tag (see poolattr.go's ownPoolTags
+// doc comment for the full derivation/citation), same infra/operator as
+// supportxtm-*, just an older tag generation. It needs its own MatchPrefix entry
+// since it doesn't share the "supportxtm-" literal prefix, but folding it into the
+// same "SupportXTM" series keeps historical and current blocks from this infra
+// grouped together on the pool-share/algo-breakdown charts. Only ~35 historical
+// blocks are affected.
 var DefaultPoolTagMappings = []db.PoolTagMapping{
 	{MatchPrefix: "WUF", CanonicalName: "Jagtech"},
 	{MatchPrefix: "supportxtm-", CanonicalName: "SupportXTM"},
+	{MatchPrefix: "GCPOOL-SOLO", CanonicalName: "SupportXTM"},
 }
 
 // AlgoOrder is the fixed stack/legend order used for the algo-distribution chart,
