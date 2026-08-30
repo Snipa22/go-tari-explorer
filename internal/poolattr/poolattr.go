@@ -178,11 +178,14 @@ func attributeExtra(height uint64, algo PowAlgo, txExtra []byte) BlockAttributio
 
 	// Fallback bucket: extra was present but didn't match anything known. Surface the raw
 	// (printable-filtered) bytes so operators can spot new pools to add to prefixTable,
-	// rather than silently dropping the data the way an unlabeled map key would.
+	// rather than silently dropping the data the way an unlabeled map key would. PoolTag
+	// uses the stricter ASCII-only filter (applied to the original txExtra bytes, not the
+	// already-printable-filtered raw) since it becomes a real pool_tag value stored in the
+	// database, while RawExtra keeps the broader printableOnly rendering for diagnostics.
 	return BlockAttribution{
 		BlockHeight: height,
 		PowAlgo:     algo,
-		PoolTag:     "",
+		PoolTag:     asciiPrintableOnly(txExtra),
 		RawExtra:    raw,
 		IsOwnPool:   false,
 		Reason:      ReasonUnknownTxExtra,
@@ -204,6 +207,25 @@ func truncatePoolTag(s string, n int) string {
 func printableOnly(b []byte) string {
 	return strings.Map(func(r rune) rune {
 		if unicode.IsPrint(r) {
+			return r
+		}
+		return -1
+	}, string(b))
+}
+
+// asciiPrintableOnly strips everything outside the printable ASCII range (0x20-0x7E
+// inclusive) from raw coinbase-extra bytes. This is intentionally stricter than
+// printableOnly (which allows any unicode.IsPrint rune, including wide Unicode
+// punctuation, emoji, and combining marks): printableOnly is used for RawExtra, a
+// diagnostic/debug field where broader Unicode is acceptable and even useful for
+// spotting what garbage/binary bytes actually showed up. asciiPrintableOnly is used
+// for the fallback PoolTag label, which becomes a real pool_tag value stored in the
+// database and surfaced/grouped in the UI - it must not admit non-ASCII printable
+// noise from garbage/binary coinbase-extra bytes into what's supposed to be a stable,
+// groupable pool identifier.
+func asciiPrintableOnly(b []byte) string {
+	return strings.Map(func(r rune) rune {
+		if r >= 0x20 && r <= 0x7E {
 			return r
 		}
 		return -1

@@ -43,40 +43,47 @@ func TestAttribute_MissingData(t *testing.T) {
 // and known external pools/solo miners.
 func TestAttribute_KnownTags(t *testing.T) {
 	cases := []struct {
-		name     string
-		rawAlgo  uint64
-		extra    string
-		wantTag  string
-		wantOwn  bool
-		wantAlgo PowAlgo
+		name       string
+		rawAlgo    uint64
+		extra      string
+		wantTag    string
+		wantOwn    bool
+		wantAlgo   PowAlgo
+		wantReason Reason
 	}{
-		{"own pool E0", 0, "WUFJagtechE0", "WUFJagtechE0", true, PowAlgoRXM},
-		{"own pool E1", 3, "WUFJagtechE1", "WUFJagtechE1", true, PowAlgoC29},
-		{"own pool S1", 2, "WUFJagtechS1", "WUFJagtechS1", true, PowAlgoRXT},
+		{"own pool E0", 0, "WUFJagtechE0", "WUFJagtechE0", true, PowAlgoRXM, ReasonOK},
+		{"own pool E1", 3, "WUFJagtechE1", "WUFJagtechE1", true, PowAlgoC29, ReasonOK},
+		{"own pool S1", 2, "WUFJagtechS1", "WUFJagtechS1", true, PowAlgoRXT, ReasonOK},
 		// Real coinbase_extra bytes are always exactly 12 bytes once decoded; anything
 		// after that is non-identifying binary/padding noise from the block, not a
 		// legitimate variable-length worker-ID feature (confirmed via live production
 		// data - see ourPoolTagLen's doc comment). This exercises the truncation itself.
-		{"own pool truncates trailing bytes", 0, "WUFJagtechE0-worker42", "WUFJagtechE0", true, PowAlgoRXM},
+		{"own pool truncates trailing bytes", 0, "WUFJagtechE0-worker42", "WUFJagtechE0", true, PowAlgoRXM, ReasonOK},
 		// Legacy/inactive node-name shape with embedded spaces, matching the real
 		// production byte pattern "WUF  Ahri   " (WUF + 2 spaces + "Ahri" + 3 trailing
 		// spaces = 12 bytes) once printable-filtered.
-		{"own pool legacy Ahri node", 4, "WUF  Ahri   -garbage-tail-bytes", "WUF  Ahri   ", true, PowAlgoSHA3X},
+		{"own pool legacy Ahri node", 4, "WUF  Ahri   -garbage-tail-bytes", "WUF  Ahri   ", true, PowAlgoSHA3X, ReasonOK},
 		// Shorter than ourPoolTagLen must clamp to len(extra), not panic.
-		{"own pool shorter than tag length", 0, "WUFshort", "WUFshort", true, PowAlgoRXM},
-		{"kryptex", 4, "/pool.kryptex.com/", "pool.kryptex.com", false, PowAlgoSHA3X},
-		{"H9", 4, "H9.com.some-worker-id", "H9.com", false, PowAlgoSHA3X},
-		{"LuckyPool", 4, "LuckyPool", "LuckyPool", false, PowAlgoSHA3X},
-		{"RXLuckyPool", 2, "RXLuckyPool", "RXLuckyPool", false, PowAlgoRXT},
-		{"hash2coin", 4, "hash2coin", "hash2coin", false, PowAlgoSHA3X},
-		{"DxPool_tari", 4, "DxPool_tari", "DxPool_tari", false, PowAlgoSHA3X},
-		{"dxpool_tari lowercase", 4, "dxpool_tari", "dxpool_tari", false, PowAlgoSHA3X},
-		{"c3pool", 0, "c3pool_merge_mining_proxy", "c3pool_merge_mining_proxy", false, PowAlgoRXM},
-		{"supportxmr", 0, "supportxmr.com_mm_proxy", "supportxmr.com_mm_proxy", false, PowAlgoRXM},
-		{"tari_merge_mining_proxy", 0, "tari_merge_mining_proxy", "tari_merge_mining_proxy", false, PowAlgoRXM},
-		{"xmr-pool", 0, "xmr-pool", "xmr-pool", false, PowAlgoRXM},
-		{"solo test", 4, "solo test", "solo test", false, PowAlgoSHA3X},
-		{"unknown extra", 4, "some-random-unrecognized-tag", "", false, PowAlgoSHA3X},
+		{"own pool shorter than tag length", 0, "WUFshort", "WUFshort", true, PowAlgoRXM, ReasonOK},
+		{"kryptex", 4, "/pool.kryptex.com/", "pool.kryptex.com", false, PowAlgoSHA3X, ReasonOK},
+		{"H9", 4, "H9.com.some-worker-id", "H9.com", false, PowAlgoSHA3X, ReasonOK},
+		{"LuckyPool", 4, "LuckyPool", "LuckyPool", false, PowAlgoSHA3X, ReasonOK},
+		{"RXLuckyPool", 2, "RXLuckyPool", "RXLuckyPool", false, PowAlgoRXT, ReasonOK},
+		{"hash2coin", 4, "hash2coin", "hash2coin", false, PowAlgoSHA3X, ReasonOK},
+		{"DxPool_tari", 4, "DxPool_tari", "DxPool_tari", false, PowAlgoSHA3X, ReasonOK},
+		{"dxpool_tari lowercase", 4, "dxpool_tari", "dxpool_tari", false, PowAlgoSHA3X, ReasonOK},
+		{"c3pool", 0, "c3pool_merge_mining_proxy", "c3pool_merge_mining_proxy", false, PowAlgoRXM, ReasonOK},
+		{"supportxmr", 0, "supportxmr.com_mm_proxy", "supportxmr.com_mm_proxy", false, PowAlgoRXM, ReasonOK},
+		{"tari_merge_mining_proxy", 0, "tari_merge_mining_proxy", "tari_merge_mining_proxy", false, PowAlgoRXM, ReasonOK},
+		{"xmr-pool", 0, "xmr-pool", "xmr-pool", false, PowAlgoRXM, ReasonOK},
+		{"solo test", 4, "solo test", "solo test", false, PowAlgoSHA3X, ReasonOK},
+		{"unknown extra", 4, "some-random-unrecognized-tag", "some-random-unrecognized-tag", false, PowAlgoSHA3X, ReasonUnknownTxExtra},
+		// Real production coinbase-extra: go-crypto-pool's leaf-solo/leaf-direct binaries
+		// emit "support<algo>-<algo>" style per-algo default tags (confirmed via
+		// leaf-solo --help on the mining host) that aren't in prefixTable, so they land
+		// in the unknown bucket but should still surface the raw tag as PoolTag rather
+		// than an empty string.
+		{"supportxtm sha3x default tag", 4, "supportxtm-sha3x", "supportxtm-sha3x", false, PowAlgoSHA3X, ReasonUnknownTxExtra},
 	}
 
 	for _, c := range cases {
@@ -91,10 +98,24 @@ func TestAttribute_KnownTags(t *testing.T) {
 			if got.PowAlgo != c.wantAlgo {
 				t.Errorf("PowAlgo = %q, want %q", got.PowAlgo, c.wantAlgo)
 			}
-			if c.wantTag == "" && got.Reason != ReasonUnknownTxExtra {
-				t.Errorf("expected ReasonUnknownTxExtra for unattributed tag, got %q", got.Reason)
+			if got.Reason != c.wantReason {
+				t.Errorf("Reason = %q, want %q", got.Reason, c.wantReason)
 			}
 		})
+	}
+}
+
+// TestAttribute_FallbackPoolTagIsASCIIOnly proves that the fallback PoolTag uses the
+// stricter asciiPrintableOnly filter, not printableOnly: a non-ASCII rune that
+// unicode.IsPrint accepts (e.g. U+00E9, "é") must still be stripped from PoolTag.
+func TestAttribute_FallbackPoolTagIsASCIIOnly(t *testing.T) {
+	extra := []byte("tag-\u00e9-end") // "tag-" + é (U+00E9, printable but non-ASCII) + "-end"
+	got := Attribute(1, 4, true, true, true, extra)
+	if got.Reason != ReasonUnknownTxExtra {
+		t.Errorf("expected ReasonUnknownTxExtra, got %q", got.Reason)
+	}
+	if got.PoolTag != "tag--end" {
+		t.Errorf("PoolTag = %q, want %q", got.PoolTag, "tag--end")
 	}
 }
 
