@@ -47,7 +47,9 @@ const microMinotariPerXTM = 1_000_000
 
 // funcs is the html/template FuncMap shared by every parsed template.
 var funcs = template.FuncMap{
-	"sub": func(a, b int) int { return a - b },
+	"sub":          func(a, b int) int { return a - b },
+	"humanize":     func(n int64) string { return humanizeInt(n) },
+	"humanizeUint": func(n uint64) string { return humanizeInt(int64(n)) },
 }
 
 // Server holds the dependencies needed to serve HTTP requests.
@@ -240,6 +242,7 @@ type recentBlocksStatsView struct {
 type algoGlanceRow struct {
 	Algo                     string
 	Count                    int64
+	CountDisplay             string
 	AvgDifficultyDisplay     string
 	CurrentDifficultyDisplay string
 }
@@ -268,16 +271,17 @@ func newAlgoGlanceRows(algos []db.AlgoCountRow, snapshots []db.DifficultySnapsho
 	for _, algo := range analysis.AlgoOrder {
 		row := algoGlanceRow{
 			Algo:                     algo,
-			AvgDifficultyDisplay:     strconv.FormatFloat(0, 'f', 2, 64),
-			CurrentDifficultyDisplay: "0",
+			AvgDifficultyDisplay:     humanizeFloat(0, 2),
+			CurrentDifficultyDisplay: humanizeInt(0),
 		}
 		if a, ok := countByAlgo[algo]; ok {
 			row.Count = a.Count
-			row.AvgDifficultyDisplay = strconv.FormatFloat(a.AvgDifficulty, 'f', 2, 64)
+			row.AvgDifficultyDisplay = humanizeFloat(a.AvgDifficulty, 2)
 		}
 		if s, ok := diffByAlgo[algo]; ok {
-			row.CurrentDifficultyDisplay = strconv.FormatInt(s.Difficulty, 10)
+			row.CurrentDifficultyDisplay = humanizeInt(s.Difficulty)
 		}
+		row.CountDisplay = humanizeInt(row.Count)
 		out = append(out, row)
 	}
 	return out
@@ -376,6 +380,21 @@ type poolStatsView struct {
 // HashRateDisplay formats HashRate with a H/s/KH/s/MH/s/GH/s suffix.
 func (v poolStatsView) HashRateDisplay() string {
 	return formatHashRate(v.HashRate)
+}
+
+// TotalHashesDisplay formats TotalHashes with comma thousands-separators.
+func (v poolStatsView) TotalHashesDisplay() string {
+	return humanizeInt(v.TotalHashes)
+}
+
+// RoundHashesDisplay formats RoundHashes with comma thousands-separators.
+func (v poolStatsView) RoundHashesDisplay() string {
+	return humanizeInt(v.RoundHashes)
+}
+
+// TotalBlocksFoundDisplay formats TotalBlocksFound with comma thousands-separators.
+func (v poolStatsView) TotalBlocksFoundDisplay() string {
+	return humanizeInt(v.TotalBlocksFound)
 }
 
 func formatHashRate(hashRate int64) string {

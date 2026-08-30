@@ -42,11 +42,11 @@ func TestNewAlgoGlanceRows_AlgoPresentInBothInputs_UsesRealValues(t *testing.T) 
 	if row.Count != 42 {
 		t.Errorf("Count = %d, want 42", row.Count)
 	}
-	if row.AvgDifficultyDisplay != "1234.50" {
-		t.Errorf("AvgDifficultyDisplay = %q, want %q", row.AvgDifficultyDisplay, "1234.50")
+	if row.AvgDifficultyDisplay != "1,234.50" {
+		t.Errorf("AvgDifficultyDisplay = %q, want %q", row.AvgDifficultyDisplay, "1,234.50")
 	}
-	if row.CurrentDifficultyDisplay != "9876" {
-		t.Errorf("CurrentDifficultyDisplay = %q, want %q", row.CurrentDifficultyDisplay, "9876")
+	if row.CurrentDifficultyDisplay != "9,876" {
+		t.Errorf("CurrentDifficultyDisplay = %q, want %q", row.CurrentDifficultyDisplay, "9,876")
 	}
 }
 
@@ -124,8 +124,8 @@ func TestNewAlgoGlanceRows_AlgoPresentOnlyInSnapshots_CurrentDiffFromSnapshotsCo
 	if sha3x.AvgDifficultyDisplay != "0.00" {
 		t.Errorf("SHA3X AvgDifficultyDisplay = %q, want %q", sha3x.AvgDifficultyDisplay, "0.00")
 	}
-	if sha3x.CurrentDifficultyDisplay != "4242" {
-		t.Errorf("SHA3X CurrentDifficultyDisplay = %q, want %q", sha3x.CurrentDifficultyDisplay, "4242")
+	if sha3x.CurrentDifficultyDisplay != "4,242" {
+		t.Errorf("SHA3X CurrentDifficultyDisplay = %q, want %q", sha3x.CurrentDifficultyDisplay, "4,242")
 	}
 }
 
