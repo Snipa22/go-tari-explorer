@@ -38,13 +38,13 @@ func newBlockTimeBucketTableView(rows []db.BlockTimeBucketRow) *analysisTableVie
 	out := make([]analysisTableRow, 0, len(rows))
 	for _, r := range rows {
 		out = append(out, analysisTableRow{
-			Height: strconv.FormatUint(r.BucketStart, 10),
+			Height: humanizeInt(int64(r.BucketStart)),
 			Values: []string{
 				formatSecondsPtr(r.MeanSeconds),
 				formatSecondsPtr(r.MedianSeconds),
 				formatSecondsPtr(r.StdDevSeconds),
 				formatMaxSecondsPtr(r.MaxSeconds),
-				strconv.FormatInt(r.SampleCount, 10),
+				humanizeInt(r.SampleCount),
 			},
 		})
 	}
