@@ -77,14 +77,33 @@ type knownPrefix struct {
 	isOwnPool bool
 }
 
-// ourPoolPrefix is the common prefix shared by every tag this operator's own pool
-// infrastructure emits (WUFJagtechE0, WUFJagtechE1, WUFJagtechS1, and any future
-// WUF-prefixed tag). Individual tags are still reported verbatim via RawExtra/PoolTag;
-// this only drives the IsOwnPool boolean.
-const ourPoolPrefix = "WUF"
+// ownPoolTag is one entry in ownPoolTags, the ordered table of coinbase-extra prefixes
+// that belong to this operator's own pool infrastructure (as opposed to prefixTable's
+// third-party pools/solo miners). Unlike knownPrefix, each ownPoolTag also carries its
+// own tagLen: own-pool tags aren't all the same byte length across families (WUF's
+// tags are; supportxtm-*'s aren't - see the doc comments below), so truncation length
+// has to travel with the specific prefix, not be a single package-level constant.
+type ownPoolTag struct {
+	prefix        string // exact byte prefix to match via strings.HasPrefix against txExtra
+	tagLen        int    // exact truncation length for this specific prefix's tags
+	canonicalName string // canonical display name for this own-pool family (see below)
+}
 
-// ourPoolTagLen is the fixed byte length own-pool coinbase-extra tags are truncated to
-// before being stored as PoolTag. Ported directly from go-tari-grpc-lib's
+// canonicalName above is not consumed by attributeExtra itself - PoolTag is still set
+// to the truncated raw tag (matching WUF's pre-existing behavior of storing the real
+// per-node tag, not a folded display name), exactly as before this field existed.
+// It exists purely as documentation/cross-reference for
+// internal/analysis.DefaultPoolTagMappings, whose {MatchPrefix, CanonicalName} entries
+// fold these same per-node/per-algo tag families into one display series for the
+// pool-share and algo-breakdown charts - see that variable's doc comment.
+
+// ownPoolTags is the ordered table of own-pool coinbase-extra prefixes, checked before
+// prefixTable in attributeExtra (own-pool status always wins over a third-party-pool
+// match, exactly as the single ourPoolPrefix check did before this table existed).
+//
+// WUF (canonicalName "Jagtech"): the common prefix shared by every tag this operator's
+// legacy pool infrastructure emits (WUFJagtechE0, WUFJagtechE1, WUFJagtechS1, and any
+// future WUF-prefixed tag). tagLen 12 is ported directly from go-tari-grpc-lib's
 // cmd/blockWinners/main.go (txExtraParser), which truncates via txString[0:12] rather
 // than keeping the whole printable-filtered string.
 //
@@ -98,7 +117,30 @@ const ourPoolPrefix = "WUF"
 // constant restores, which fragmented what should be ~55-60 real per-node pool tags
 // into ~45,900 spurious distinct values in the blocks table (one per garbage-suffix
 // variant). Keep this in sync with the reference implementation if it ever changes.
-const ourPoolTagLen = 12
+//
+// supportxtm-* (canonicalName "SupportXTM"): confirmed as this operator's own pool
+// infrastructure (SupportXTM), same tier as WUF, not a third-party prefixTable entry.
+// go-crypto-pool's cmd/leaf-direct/main.go (mirrored by cmd/leaf-solo/main.go)
+// defaultCoinbaseExtraTag/resolveCoinbaseExtraTag build the default per-algo
+// coinbase-extra tag as exactly "supportxtm-" + algoTagSuffix(cfg), with
+// algoTagSuffix returning one of "sha3x"/"c29"/"rxt"/"rxm" and no separator or version
+// byte in between. internal/leaflib/solo/node.go and internal/leaflib/direct/node.go's
+// GetJobParams then append coinbaseExtraTag directly (coinbaseExtra = append(
+// coinbaseExtra, c.coinbaseExtraTag...)) with no separator before the random nonce
+// buffer, so the literal tag bytes land at the front of the on-chain coinbase_extra
+// unmodified. Unlike WUF, the four real tags are NOT all the same length ("
+// supportxtm-sha3x" is 16 bytes; "supportxtm-c29"/"supportxtm-rxt"/"supportxtm-rxm"
+// are each 14 bytes), so each variant gets its own table row with its own exact
+// tagLen rather than sharing one - a single shared tagLen (e.g. the longest, 16)
+// would include 2 bytes of the following nonce buffer as garbage on the three
+// 14-byte variants instead of stopping exactly at the real tag boundary.
+var ownPoolTags = []ownPoolTag{
+	{prefix: "WUF", tagLen: 12, canonicalName: "Jagtech"},
+	{prefix: "supportxtm-sha3x", tagLen: 16, canonicalName: "SupportXTM"},
+	{prefix: "supportxtm-c29", tagLen: 14, canonicalName: "SupportXTM"},
+	{prefix: "supportxtm-rxt", tagLen: 14, canonicalName: "SupportXTM"},
+	{prefix: "supportxtm-rxm", tagLen: 14, canonicalName: "SupportXTM"},
+}
 
 // prefixTable is the cleaned-up replacement for the original CLI's chain of
 // strings.HasPrefix checks. Extend this table as new pools are identified via chain
@@ -154,13 +196,15 @@ func Attribute(height uint64, rawAlgo uint64, hasOutputs, hasCoinbaseOutput, has
 func attributeExtra(height uint64, algo PowAlgo, txExtra []byte) BlockAttribution {
 	raw := printableOnly(txExtra)
 
-	if strings.HasPrefix(string(txExtra), ourPoolPrefix) {
-		return BlockAttribution{
-			BlockHeight: height,
-			PowAlgo:     algo,
-			PoolTag:     truncatePoolTag(raw, ourPoolTagLen),
-			RawExtra:    raw,
-			IsOwnPool:   true,
+	for _, opt := range ownPoolTags {
+		if strings.HasPrefix(string(txExtra), opt.prefix) {
+			return BlockAttribution{
+				BlockHeight: height,
+				PowAlgo:     algo,
+				PoolTag:     truncatePoolTag(raw, opt.tagLen),
+				RawExtra:    raw,
+				IsOwnPool:   true,
+			}
 		}
 	}
 

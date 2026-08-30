@@ -40,8 +40,9 @@ const DefaultTopPools = 8
 // way (shared prefix, per-node/per-worker suffix) can be added here as one more
 // {MatchPrefix, CanonicalName} entry - no code changes required in db/analysis/server.
 //
-// The single entry below (WUF -> "Jagtech") is the repo owner's own pool
-// infrastructure. Verified directly against live production data (query:
+// There are two entries below, both the repo owner's own pool infrastructure:
+//
+// WUF -> "Jagtech": verified directly against live production data (query:
 // `SELECT DISTINCT pool_tag FROM blocks WHERE pool_tag LIKE 'WUF%'` against the
 // tari_explorer database, 2026-08-23) that the WUF prefix covers every currently
 // fragmented pool_tag family in the table (active node family "Jagtech", legacy/
@@ -49,8 +50,21 @@ const DefaultTopPools = 8
 // "Graha'tia"/"Y'shtola") - all of it the same pool operator's infrastructure sharing
 // the "WUF" coinbase-extra prefix - and that no other pool currently listed in
 // prefixTable (e.g. pool.kryptex.com) exhibits this problem, so it needs no entry here.
+//
+// supportxtm- -> "SupportXTM": the second own-pool prefix, covering the four
+// per-algo default tags go-crypto-pool's leaf-solo/leaf-direct binaries emit
+// ("supportxtm-sha3x", "supportxtm-c29", "supportxtm-rxt", "supportxtm-rxm" - see
+// poolattr.go's ownPoolTags doc comment for the full derivation). This prefix-fold
+// only works correctly because poolattr's own-pool table now truncates each of those
+// four tags to its own exact byte length before storing PoolTag, making every stored
+// supportxtm-* value exact and stable; before that (i.e. before this change, back
+// when these landed in poolattr's unknown-tag fallback bucket) the fallback path
+// would have appended whatever variable-length worker-id/nonce-buffer garbage
+// followed the tag, fragmenting this prefix into many spurious distinct pool_tag
+// values the same way WUF's doc comment above describes almost happening for WUF.
 var DefaultPoolTagMappings = []db.PoolTagMapping{
 	{MatchPrefix: "WUF", CanonicalName: "Jagtech"},
+	{MatchPrefix: "supportxtm-", CanonicalName: "SupportXTM"},
 }
 
 // AlgoOrder is the fixed stack/legend order used for the algo-distribution chart,
