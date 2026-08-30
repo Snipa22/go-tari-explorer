@@ -6,7 +6,6 @@ package server
 
 import (
 	"math"
-	"strconv"
 
 	"github.com/Snipa22/go-tari-explorer/internal/chartrender"
 )
@@ -19,28 +18,31 @@ type analysisTableView struct {
 
 // analysisTableRow is a single bucket's worth of formatted values, in Columns order.
 type analysisTableRow struct {
-	Height string   // bucket start height, ALWAYS formatted as a plain integer
+	Height string   // bucket start height, ALWAYS formatted as a comma-grouped integer (no decimal point)
 	Values []string // one formatted string per series, same order as Columns[1:]
 }
 
-// formatBucketHeight renders a bucket-start height (Point.X) as a plain integer
-// string, no decimal point, ever - rounding to the nearest integer first so a
+// formatBucketHeight renders a bucket-start height (Point.X) as a comma-grouped
+// integer string, no decimal point, ever - rounding to the nearest integer first so a
 // pathological non-integral float (float noise, etc.) never panics or leaks a
-// fractional part into the table.
+// fractional part into the table. This is a data-table axis value meant for skimming,
+// not a link target/identifier, so (unlike blocks_list.html's per-row Height) it gets
+// the same comma-grouping as any other displayed quantity.
 func formatBucketHeight(x float64) string {
-	return strconv.FormatInt(int64(math.Round(x)), 10)
+	return humanizeInt(int64(math.Round(x)))
 }
 
 // formatSeriesValue renders a single series value for one table cell. When isCount is
-// true the value is a block count and is rendered as a plain rounded integer (no
-// decimal point, matching formatBucketHeight's rounding behavior). Otherwise the value
-// is rendered with 2 decimal places, matching the AvgDifficultyDisplay/formatSecondsPtr
-// convention already used elsewhere in this package.
+// true the value is a block count and is rendered as a comma-grouped rounded integer
+// (no decimal point, matching formatBucketHeight's rounding behavior). Otherwise the
+// value is rendered with 2 decimal places (and comma-grouped on the integer part),
+// matching the AvgDifficultyDisplay/formatSecondsPtr convention already used elsewhere
+// in this package.
 func formatSeriesValue(v float64, isCount bool) string {
 	if isCount {
-		return strconv.FormatInt(int64(math.Round(v)), 10)
+		return humanizeInt(int64(math.Round(v)))
 	}
-	return strconv.FormatFloat(v, 'f', 2, 64)
+	return humanizeFloat(v, 2)
 }
 
 // newAnalysisTableView shapes points/order (the same values already returned by every

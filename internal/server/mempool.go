@@ -35,6 +35,11 @@ type mempoolStatsView struct {
 	UnconfirmedWeight uint64
 }
 
+// UnconfirmedWeightDisplay formats UnconfirmedWeight with comma thousands-separators.
+func (v mempoolStatsView) UnconfirmedWeightDisplay() string {
+	return humanizeInt(int64(v.UnconfirmedWeight))
+}
+
 func newMempoolStatsView(stats *tari_generated.MempoolStatsResponse) mempoolStatsView {
 	return mempoolStatsView{
 		UnconfirmedTxs:    stats.GetUnconfirmedTxs(),

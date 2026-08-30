@@ -218,8 +218,8 @@ func TestNewAnalysisTableView_NonCountSeries(t *testing.T) {
 }
 
 // TestNewAnalysisTableView_HeightAlwaysPlainInteger proves the bucket-start height
-// (Point.X) always renders as a plain integer string, with no decimal point, even
-// when float noise makes the input value slightly non-integral.
+// (Point.X) always renders as a comma-grouped integer string, with no decimal point,
+// even when float noise makes the input value slightly non-integral.
 func TestNewAnalysisTableView_HeightAlwaysPlainInteger(t *testing.T) {
 	points := []chartrender.Point{
 		{X: 324576.0000000001, Series: map[string]float64{}},
@@ -231,7 +231,7 @@ func TestNewAnalysisTableView_HeightAlwaysPlainInteger(t *testing.T) {
 		t.Fatalf("len(Rows) = %d, want 1", len(view.Rows))
 	}
 	got := view.Rows[0].Height
-	want := "324576"
+	want := "324,576"
 	if got != want {
 		t.Errorf("Height = %q, want %q", got, want)
 	}

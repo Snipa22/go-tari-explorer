@@ -37,7 +37,7 @@
         <thead><tr><th>Algo</th><th>Blocks</th><th>Diff</th><th>Current block diff</th></tr></thead>
         <tbody>
         {{range .AlgoGlance}}
-        <tr><td>{{.Algo}}</td><td>{{.Count}}</td><td>{{.AvgDifficultyDisplay}}</td><td>{{.CurrentDifficultyDisplay}}</td></tr>
+        <tr><td>{{.Algo}}</td><td>{{.CountDisplay}}</td><td>{{.AvgDifficultyDisplay}}</td><td>{{.CurrentDifficultyDisplay}}</td></tr>
         {{end}}
         </tbody>
     </table>
@@ -51,7 +51,7 @@
     <table class="glance-table">
         <thead><tr><th>Unconfirmed</th><th>Reorg</th><th>Weight</th></tr></thead>
         <tbody>
-        <tr><td>{{.MempoolStats.UnconfirmedTxs}}</td><td>{{.MempoolStats.ReorgTxs}}</td><td>{{.MempoolStats.UnconfirmedWeight}}</td></tr>
+        <tr><td>{{.MempoolStats.UnconfirmedTxs}}</td><td>{{.MempoolStats.ReorgTxs}}</td><td>{{.MempoolStats.UnconfirmedWeightDisplay}}</td></tr>
         </tbody>
     </table>
     {{end}}
@@ -75,7 +75,7 @@
     <td>{{.Hash}}</td>
     <td>{{.TimeString}}</td>
     <td>{{.PowAlgo}}</td>
-    <td>{{.Difficulty}}</td>
+    <td>{{humanize .Difficulty}}</td>
     <td>{{.KernelCount}}</td>
     <td>{{.OutputCount}}</td>
     <td class="{{.PoolCSSClass}}">{{.PoolDisplay}}</td>
