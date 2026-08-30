@@ -1,6 +1,21 @@
 {{define "content"}}
 <h2>Blocks</h2>
 
+<h3>Current Difficulty <small style="color:#888; font-weight:normal;">(live per-algo target, updated by the difficulty-poller)</small></h3>
+{{if .CurrentDifficultyError}}
+<p style="color:#ff8080;">{{.CurrentDifficultyError}}</p>
+{{else}}
+<div class="stat-grid">
+    {{range .CurrentDifficulty}}
+    <div class="stat-card">
+        <div class="label">{{.Algo}}</div>
+        <div class="value">{{.Difficulty}}</div>
+        <div class="label">height {{.Height}} &middot; {{.RecordedAtDisplay}}</div>
+    </div>
+    {{end}}
+</div>
+{{end}}
+
 <h3>At a Glance &mdash; Last {{.RecentStats.SampleCount}} Blocks</h3>
 
 <div class="glance-row">

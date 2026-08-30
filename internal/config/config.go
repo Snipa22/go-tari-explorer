@@ -172,3 +172,29 @@ func MempoolPollInterval() time.Duration {
 	}
 	return DefaultMempoolPollInterval
 }
+
+// DefaultDifficultyPollInterval is how often cmd/difficulty-poller polls the
+// already-indexed `blocks` table (via db.CurrentDifficultyPerAlgo - no live base-node
+// GRPC call, see that method's doc comment) for each algo's latest height/difficulty
+// absent an override. Deliberately much shorter than DefaultMempoolPollInterval: this
+// poll is just a cheap indexed Postgres read (not a GRPC round trip), and the point is
+// to reflect the front page's "current difficulty" stat cards as close to real-time as
+// practical - a new row is only ever inserted when an algo's height actually advances
+// (see internal/difficultypoller.Poller.Tick), so a short interval doesn't bloat the
+// table, it just lowers the detection latency. Override with
+// TARI_EXPLORER_DIFFICULTY_POLL_INTERVAL (a time.ParseDuration string, e.g. "500ms") or
+// the -poll-interval flag.
+const DefaultDifficultyPollInterval = 1 * time.Second
+
+// DifficultyPollInterval returns TARI_EXPLORER_DIFFICULTY_POLL_INTERVAL parsed as a
+// time.Duration if set to a valid duration string, else DefaultDifficultyPollInterval.
+// Same "typo falls back to default rather than failing startup" behavior as
+// MempoolPollInterval.
+func DifficultyPollInterval() time.Duration {
+	if v := os.Getenv("TARI_EXPLORER_DIFFICULTY_POLL_INTERVAL"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil {
+			return d
+		}
+	}
+	return DefaultDifficultyPollInterval
+}
