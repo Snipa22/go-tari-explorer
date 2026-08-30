@@ -349,6 +349,87 @@ func TestBlockTime_NoSamples(t *testing.T) {
 	}
 }
 
+// TestBlockTime_BucketMeanStdDevMax proves db.BlockTimeDeltaBuckets' per-bucket
+// mean/median/stddev/max fields (added alongside the existing MedianSeconds/
+// SampleCount for the block-time data table - see internal/server's
+// newBlockTimeBucketTableView) come back correct, using the exact same fixture blocks
+// (heights 0-3, deltas 10/20/30) as TestBlockTime above, via a direct
+// db.BlockTimeDeltaBuckets call - the same parallel/direct-call pattern
+// handleAnalysisBlockTime now uses in production to get raw per-bucket rows for the
+// table alongside analysis.BlockTime's chart Points.
+func TestBlockTime_BucketMeanStdDevMax(t *testing.T) {
+	database := setupTestDB(t)
+	ctx := context.Background()
+
+	// Heights 0..3 with deltas 10, 20, 30 seconds (mean 20, median 20, max 30), all in
+	// bucket [0,999].
+	seedBlock(t, database, 0, 1000, "RXM", 100, nil)
+	seedBlock(t, database, 1, 1010, "RXM", 100, nil) // delta 10
+	seedBlock(t, database, 2, 1030, "RXM", 100, nil) // delta 20
+	seedBlock(t, database, 3, 1060, "RXM", 100, nil) // delta 30
+
+	rows, err := database.BlockTimeDeltaBuckets(ctx, 1000, 0, 3)
+	if err != nil {
+		t.Fatalf("BlockTimeDeltaBuckets: %v", err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("len(rows) = %d, want 1", len(rows))
+	}
+	r := rows[0]
+	if r.SampleCount != 3 {
+		t.Errorf("SampleCount = %d, want 3", r.SampleCount)
+	}
+	if r.MeanSeconds == nil || *r.MeanSeconds != 20 {
+		t.Errorf("MeanSeconds = %v, want 20", r.MeanSeconds)
+	}
+	if r.MedianSeconds == nil || *r.MedianSeconds != 20 {
+		t.Errorf("MedianSeconds = %v, want 20", r.MedianSeconds)
+	}
+	if r.MaxSeconds == nil || *r.MaxSeconds != 30 {
+		t.Errorf("MaxSeconds = %v, want 30", r.MaxSeconds)
+	}
+	if r.StdDevSeconds == nil {
+		t.Errorf("StdDevSeconds = nil, want a value")
+	}
+}
+
+// TestBlockTime_BucketMeanStdDevMax_NoSamples proves a zero-sample bucket's
+// MeanSeconds/MedianSeconds/StdDevSeconds/MaxSeconds all come back nil (not, say, a
+// pointer to 0.0) and SampleCount is 0, via a direct db.BlockTimeDeltaBuckets call -
+// parallel to TestBlockTime_NoSamples above, which covers the same zero-sample shape
+// via analysis.BlockTime's chart-Points/summary return instead.
+func TestBlockTime_BucketMeanStdDevMax_NoSamples(t *testing.T) {
+	database := setupTestDB(t)
+	ctx := context.Background()
+
+	// Single block with no predecessor row -> zero usable samples.
+	seedBlock(t, database, 500, 1000, "RXM", 100, nil)
+
+	rows, err := database.BlockTimeDeltaBuckets(ctx, 1000, 0, 999)
+	if err != nil {
+		t.Fatalf("BlockTimeDeltaBuckets: %v", err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("len(rows) = %d, want 1", len(rows))
+	}
+	r := rows[0]
+	if r.SampleCount != 0 {
+		t.Errorf("SampleCount = %d, want 0", r.SampleCount)
+	}
+	if r.MeanSeconds != nil {
+		t.Errorf("MeanSeconds = %v, want nil", *r.MeanSeconds)
+	}
+	if r.MedianSeconds != nil {
+		t.Errorf("MedianSeconds = %v, want nil", *r.MedianSeconds)
+	}
+	if r.StdDevSeconds != nil {
+		t.Errorf("StdDevSeconds = %v, want nil", *r.StdDevSeconds)
+	}
+	if r.MaxSeconds != nil {
+		t.Errorf("MaxSeconds = %v, want nil", *r.MaxSeconds)
+	}
+}
+
 // TestDifficulty is the core regression test for per-algo average difficulty on the
 // chart-reshaping layer: it seeds two algos with deliberately very different
 // difficulty magnitudes in the same bucket so that an (incorrect) single blended

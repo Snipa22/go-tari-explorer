@@ -942,15 +942,23 @@ func (d *DB) UnmappedPoolTags(ctx context.Context, mappings []PoolTagMapping) ([
 	return out, rows.Err()
 }
 
-// BlockTimeBucketRow is one row of the height-bucketed block-time report: the median
-// inter-block time (seconds) for blocks in [BucketStart, BucketEnd] that have a usable
-// predecessor, plus how many blocks in that bucket actually contributed a sample.
-// MedianSeconds is nil if the bucket had zero usable samples (e.g. every block in it hit
-// a predecessor gap - see BlockTimeDeltaBuckets).
+// BlockTimeBucketRow is one row of the height-bucketed block-time report: the
+// mean/median/sample-stddev/max inter-block time (seconds) for blocks in [BucketStart,
+// BucketEnd] that have a usable predecessor, plus how many blocks in that bucket
+// actually contributed a sample. MeanSeconds/MedianSeconds/StdDevSeconds/MaxSeconds are
+// all nil if the bucket had zero usable samples (e.g. every block in it hit a
+// predecessor gap - see BlockTimeDeltaBuckets), matching BlockTimeSummaryRow's
+// nil-when-zero-samples convention. Note the block-time chart itself (see
+// internal/analysis.BlockTime) only plots MedianSeconds, for robustness against
+// outliers - the mean/stddev/max fields here exist for the per-bucket data table
+// (internal/server's newBlockTimeBucketTableView), not the chart.
 type BlockTimeBucketRow struct {
 	BucketStart   uint64
 	BucketEnd     uint64
+	MeanSeconds   *float64
 	MedianSeconds *float64
+	StdDevSeconds *float64
+	MaxSeconds    *int64
 	SampleCount   int64
 }
 
@@ -975,14 +983,18 @@ const blockTimeDeltasCTE = `
 `
 
 // BlockTimeDeltaBuckets groups blocks in [fromHeight, toHeight] (inclusive) into the same
-// height buckets as AlgoBucketCounts, and within each bucket computes the MEDIAN
-// inter-block time (via Postgres' PERCENTILE_CONT(0.5), computed server-side) rather than
-// the mean. Block times have a long right tail (network blips, indexer catch-up gaps,
-// occasional multi-minute stretches) that would otherwise skew a mean upward and make the
-// chart look noisier than the typical block cadence actually is - median is more robust to
-// those outliers and is what this chart plots. (See BlockTimeSummary for the full
-// mean/median/stddev/max breakdown used by the stat-card panel, which surfaces the mean
-// too so the skew itself is visible to the reader.) bucketSize must be > 0.
+// height buckets as AlgoBucketCounts, and within each bucket computes mean/median/sample
+// standard deviation/max inter-block time (using the exact same aggregate expressions as
+// BlockTimeSummary: AVG, PERCENTILE_CONT(0.5), STDDEV_SAMP, MAX, all computed
+// server-side), plus the sample count. The chart built from this data
+// (internal/analysis.BlockTime) only plots MedianSeconds, not the mean/stddev/max -
+// block times have a long right tail (network blips, indexer catch-up gaps, occasional
+// multi-minute stretches) that would otherwise skew a mean upward and make the chart
+// look noisier than the typical block cadence actually is, so median is what's chosen
+// for the chart's robustness to those outliers. The mean/stddev/max fields exist for
+// the per-bucket data table instead (see internal/server's newBlockTimeBucketTableView),
+// mirroring the full breakdown BlockTimeSummary already provides for the page-wide
+// stat-card panel. bucketSize must be > 0.
 func (d *DB) BlockTimeDeltaBuckets(ctx context.Context, bucketSize uint64, fromHeight, toHeight uint64) ([]BlockTimeBucketRow, error) {
 	if bucketSize == 0 {
 		return nil, fmt.Errorf("db: block time delta buckets: bucket size must be > 0")
@@ -991,7 +1003,10 @@ func (d *DB) BlockTimeDeltaBuckets(ctx context.Context, bucketSize uint64, fromH
 	rows, err := d.Pool.Query(ctx, blockTimeDeltasCTE+`
 		SELECT
 			(height / $3) * $3 AS bucket_start,
+			AVG(delta_seconds) AS mean_seconds,
 			PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY delta_seconds) AS median_seconds,
+			STDDEV_SAMP(delta_seconds) AS stddev_seconds,
+			MAX(delta_seconds) AS max_seconds,
 			COUNT(delta_seconds) AS sample_count
 		FROM deltas
 		GROUP BY bucket_start
@@ -1005,7 +1020,7 @@ func (d *DB) BlockTimeDeltaBuckets(ctx context.Context, bucketSize uint64, fromH
 	var out []BlockTimeBucketRow
 	for rows.Next() {
 		var r BlockTimeBucketRow
-		if err := rows.Scan(&r.BucketStart, &r.MedianSeconds, &r.SampleCount); err != nil {
+		if err := rows.Scan(&r.BucketStart, &r.MeanSeconds, &r.MedianSeconds, &r.StdDevSeconds, &r.MaxSeconds, &r.SampleCount); err != nil {
 			return nil, fmt.Errorf("db: block time delta buckets: scan: %w", err)
 		}
 		r.BucketEnd = r.BucketStart + bucketSize - 1
