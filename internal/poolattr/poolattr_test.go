@@ -79,11 +79,19 @@ func TestAttribute_KnownTags(t *testing.T) {
 		{"solo test", 4, "solo test", "solo test", false, PowAlgoSHA3X, ReasonOK},
 		{"unknown extra", 4, "some-random-unrecognized-tag", "some-random-unrecognized-tag", false, PowAlgoSHA3X, ReasonUnknownTxExtra},
 		// Real production coinbase-extra: go-crypto-pool's leaf-solo/leaf-direct binaries
-		// emit "support<algo>-<algo>" style per-algo default tags (confirmed via
-		// leaf-solo --help on the mining host) that aren't in prefixTable, so they land
-		// in the unknown bucket but should still surface the raw tag as PoolTag rather
-		// than an empty string.
-		{"supportxtm sha3x default tag", 4, "supportxtm-sha3x", "supportxtm-sha3x", false, PowAlgoSHA3X, ReasonUnknownTxExtra},
+		// build the default per-algo coinbase-extra tag as exactly
+		// "supportxtm-" + algoTagSuffix(cfg), which is this operator's own SupportXTM
+		// pool infrastructure - a recognized own-pool prefix (see ownPoolTags), not an
+		// unknown-fallback tag.
+		{"supportxtm sha3x default tag", 4, "supportxtm-sha3x", "supportxtm-sha3x", true, PowAlgoSHA3X, ReasonOK},
+		// Each supportxtm-<algo> variant truncates to its own exact tagLen, dropping
+		// trailing worker-id/nonce-buffer noise exactly the way the WUF "truncates
+		// trailing bytes" case above does, but per-variant since the four tags aren't
+		// all the same length (16 bytes for sha3x, 14 for c29/rxt/rxm).
+		{"supportxtm sha3x truncates trailing bytes", 4, "supportxtm-sha3x-worker07\x00\x01", "supportxtm-sha3x", true, PowAlgoSHA3X, ReasonOK},
+		{"supportxtm c29 truncates trailing bytes", 3, "supportxtm-c29-worker07\x00\x01", "supportxtm-c29", true, PowAlgoC29, ReasonOK},
+		{"supportxtm rxt truncates trailing bytes", 2, "supportxtm-rxt-worker07\x00\x01", "supportxtm-rxt", true, PowAlgoRXT, ReasonOK},
+		{"supportxtm rxm truncates trailing bytes", 0, "supportxtm-rxm-worker07\x00\x01", "supportxtm-rxm", true, PowAlgoRXM, ReasonOK},
 	}
 
 	for _, c := range cases {
