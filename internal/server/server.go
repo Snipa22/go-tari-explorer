@@ -602,14 +602,20 @@ func toOutputViews(outputs []db.Output) []outputView {
 	return out
 }
 
-// formatMicroMinotari renders a raw MicroMinotari amount as XTM, trimming trailing
-// zeros after the decimal point (but always leaving at least "X.0").
+// formatMicroMinotari renders a raw MicroMinotari amount as XTM, comma-grouping the
+// integer part (same convention as humanizeFloat/groupDigits elsewhere in this
+// package) and trimming trailing zeros after the decimal point (but always leaving
+// at least "X.0").
 func formatMicroMinotari(microMinotari uint64) string {
 	s := strconv.FormatFloat(float64(microMinotari)/float64(microMinotariPerXTM), 'f', 6, 64)
 	s = strings.TrimRight(s, "0")
 	s = strings.TrimSuffix(s, ".")
-	if !strings.Contains(s, ".") {
-		s += ".0"
+	intPart, decPart, hasDec := cutLastDot(s)
+	intPart = groupDigits(intPart)
+	if hasDec {
+		s = intPart + "." + decPart
+	} else {
+		s = intPart + ".0"
 	}
 	return s + " XTM"
 }
