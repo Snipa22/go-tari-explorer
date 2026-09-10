@@ -73,3 +73,33 @@ func newAnalysisTableView(points []chartrender.Point, order []string, isCount bo
 
 	return &analysisTableView{Columns: columns, Rows: rows}
 }
+
+// newRewardsTableView shapes points/order into an analysisTableView exactly like
+// newAnalysisTableView does, but for the two rewards-by-X views: every series value is
+// a raw MicroMinotari sum (see db.RewardBucketRow / db.RewardPoolBucketRow), so each
+// cell is rendered via formatMicroMinotari (XTM, trailing-zero-trimmed) rather than
+// either of formatSeriesValue's isCount/2-decimal-float paths - those would render the
+// wrong units here (a bare integer or "1234.56" with no XTM suffix, off by a factor of
+// 1e6 from a human-readable amount). Reuses formatMicroMinotari's existing
+// rounding/trimming logic rather than reimplementing it; negative values never occur
+// here (a summed reward is always >= 0) so the float64 -> uint64 conversion below is
+// safe after rounding.
+func newRewardsTableView(points []chartrender.Point, order []string) *analysisTableView {
+	columns := make([]string, 0, len(order)+1)
+	columns = append(columns, "Height")
+	columns = append(columns, order...)
+
+	rows := make([]analysisTableRow, 0, len(points))
+	for _, pt := range points {
+		values := make([]string, len(order))
+		for i, name := range order {
+			values[i] = formatMicroMinotari(uint64(math.Round(pt.Series[name])))
+		}
+		rows = append(rows, analysisTableRow{
+			Height: formatBucketHeight(pt.X),
+			Values: values,
+		})
+	}
+
+	return &analysisTableView{Columns: columns, Rows: rows}
+}

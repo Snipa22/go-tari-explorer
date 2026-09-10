@@ -411,3 +411,55 @@ func (s *Server) handleAnalysisPoolAlgoBreakdownPNG(w http.ResponseWriter, r *ht
 	png, err := chartrender.StackedAreaChart(points, order, "Pool Algo Breakdown: "+pool, "block height", "block count")
 	writePNG(w, png, err, "analysis pool algo breakdown png")
 }
+
+func (s *Server) handleAnalysisRewardsByAlgo(w http.ResponseWriter, r *http.Request) {
+	p := s.parseAnalysisParams(r)
+	data := analysisViewData{Title: "Rewards by Algo", ImgSrc: imgSrc("/analysis/rewards-by-algo.png", p), Params: p}
+	// See handleAnalysisAlgoDistribution's comment above re: tooFewBucketsForChart.
+	if points, order, err := analysis.RewardsByAlgo(r.Context(), s.DB, p.BucketSize, p.From, p.To); err != nil {
+		log.Printf("server: analysis rewards by algo: %v", err)
+		data.Error = "unable to load chart data"
+	} else {
+		data.Table = newRewardsTableView(points, order)
+	}
+	if err := s.analysisViewTmpl.Execute(w, data); err != nil {
+		log.Printf("server: render analysis rewards by algo: %v", err)
+	}
+}
+
+func (s *Server) handleAnalysisRewardsByPool(w http.ResponseWriter, r *http.Request) {
+	p := s.parseAnalysisParams(r)
+	data := analysisViewData{Title: "Rewards by Pool", ImgSrc: imgSrc("/analysis/rewards-by-pool.png", p), Params: p}
+	// See handleAnalysisAlgoDistribution's comment above re: tooFewBucketsForChart.
+	if points, order, err := analysis.RewardsByPool(r.Context(), s.DB, p.BucketSize, p.From, p.To, analysis.DefaultTopPools, analysis.DefaultPoolTagMappings); err != nil {
+		log.Printf("server: analysis rewards by pool: %v", err)
+		data.Error = "unable to load chart data"
+	} else {
+		data.Table = newRewardsTableView(points, order)
+	}
+	if err := s.analysisViewTmpl.Execute(w, data); err != nil {
+		log.Printf("server: render analysis rewards by pool: %v", err)
+	}
+}
+
+func (s *Server) handleAnalysisRewardsByAlgoPNG(w http.ResponseWriter, r *http.Request) {
+	p := s.parseAnalysisParams(r)
+	points, order, err := analysis.RewardsByAlgo(r.Context(), s.DB, p.BucketSize, p.From, p.To)
+	if err != nil {
+		writePNG(w, nil, err, "analysis rewards by algo png")
+		return
+	}
+	png, err := chartrender.StackedAreaChart(points, order, "Rewards by Algo", "block height", "reward (MicroMinotari)")
+	writePNG(w, png, err, "analysis rewards by algo png")
+}
+
+func (s *Server) handleAnalysisRewardsByPoolPNG(w http.ResponseWriter, r *http.Request) {
+	p := s.parseAnalysisParams(r)
+	points, order, err := analysis.RewardsByPool(r.Context(), s.DB, p.BucketSize, p.From, p.To, analysis.DefaultTopPools, analysis.DefaultPoolTagMappings)
+	if err != nil {
+		writePNG(w, nil, err, "analysis rewards by pool png")
+		return
+	}
+	png, err := chartrender.StackedAreaChart(points, order, "Rewards by Pool", "block height", "reward (MicroMinotari)")
+	writePNG(w, png, err, "analysis rewards by pool png")
+}
