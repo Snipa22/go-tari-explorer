@@ -269,3 +269,70 @@ func TestNewAnalysisTableView_EmptyPointsAndOrder(t *testing.T) {
 		t.Errorf("Columns = %v, want [\"Height\"]", view.Columns)
 	}
 }
+
+// TestNewRewardsTableView_RendersXTM proves reward-series values render as XTM via
+// formatMicroMinotari (trailing-zero-trimmed, "X.0" floor, " XTM" suffix), not via
+// either of formatSeriesValue's isCount/2-decimal-float paths - those would be off by
+// a factor of 1e6 and missing the XTM unit entirely for a raw MicroMinotari value.
+func TestNewRewardsTableView_RendersXTM(t *testing.T) {
+	points := []chartrender.Point{
+		{X: 1000, Series: map[string]float64{"RXM": 5_000_000, "RXT": 1_500_000, "C29": 0, "SHA3X": 1_000_000}},
+	}
+	order := []string{"RXM", "RXT", "C29", "SHA3X"}
+
+	view := newRewardsTableView(points, order)
+
+	wantCols := []string{"Height", "RXM", "RXT", "C29", "SHA3X"}
+	if len(view.Columns) != len(wantCols) {
+		t.Fatalf("Columns = %v, want %v", view.Columns, wantCols)
+	}
+
+	if len(view.Rows) != 1 {
+		t.Fatalf("len(Rows) = %d, want 1", len(view.Rows))
+	}
+	row := view.Rows[0]
+	wantValues := []string{"5.0 XTM", "1.5 XTM", "0.0 XTM", "1.0 XTM"}
+	for i, want := range wantValues {
+		if row.Values[i] != want {
+			t.Errorf("Values[%d] = %q, want %q", i, row.Values[i], want)
+		}
+	}
+}
+
+// TestNewRewardsTableView_HeightAlwaysPlainInteger mirrors
+// TestNewAnalysisTableView_HeightAlwaysPlainInteger for the rewards-specific
+// table-shaping helper.
+func TestNewRewardsTableView_HeightAlwaysPlainInteger(t *testing.T) {
+	points := []chartrender.Point{
+		{X: 324576.0000000001, Series: map[string]float64{}},
+	}
+
+	view := newRewardsTableView(points, nil)
+
+	if len(view.Rows) != 1 {
+		t.Fatalf("len(Rows) = %d, want 1", len(view.Rows))
+	}
+	got := view.Rows[0].Height
+	want := "324,576"
+	if got != want {
+		t.Errorf("Height = %q, want %q", got, want)
+	}
+}
+
+// TestNewRewardsTableView_EmptyPoints proves an empty points slice never panics and
+// produces a sane header-only result, mirroring
+// TestNewAnalysisTableView_EmptyPoints.
+func TestNewRewardsTableView_EmptyPoints(t *testing.T) {
+	view := newRewardsTableView(nil, []string{"Jagtech", "unknown"})
+
+	if view == nil {
+		t.Fatal("newRewardsTableView returned nil for empty points")
+	}
+	if len(view.Rows) != 0 {
+		t.Errorf("len(Rows) = %d, want 0", len(view.Rows))
+	}
+	wantCols := []string{"Height", "Jagtech", "unknown"}
+	if len(view.Columns) != len(wantCols) {
+		t.Fatalf("Columns = %v, want %v", view.Columns, wantCols)
+	}
+}

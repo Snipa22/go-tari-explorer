@@ -490,3 +490,150 @@ func TestDifficulty(t *testing.T) {
 		t.Errorf("bucket 1000 RXM avg difficulty = %v, want 500", b1["RXM"])
 	}
 }
+
+// seedBlockWithReward inserts one fixture block row with the fields the reward
+// analysis queries care about (height, pow_algo, pool_tag, reward_micro_minotari) -
+// mirrors seedBlock above but adds the reward field seedBlock's other callers don't
+// need.
+func seedBlockWithReward(t *testing.T, database *db.DB, height uint64, powAlgo string, poolTag *string, rewardMicroMinotari uint64) {
+	t.Helper()
+	b := db.Block{
+		Height:              height,
+		Hash:                "hash",
+		PrevHash:            "prev",
+		OutputMr:            []byte{},
+		BlockOutputMr:       []byte{},
+		KernelMr:            []byte{},
+		InputMr:             []byte{},
+		TotalKernelOffset:   []byte{},
+		TotalScriptOffset:   []byte{},
+		ValidatorNodeMr:     []byte{},
+		PowData:             []byte{},
+		PowAlgo:             powAlgo,
+		PoolTag:             poolTag,
+		RewardMicroMinotari: rewardMicroMinotari,
+	}
+	if err := database.UpsertBlock(context.Background(), b); err != nil {
+		t.Fatalf("analysis: seed block with reward %d: %v", height, err)
+	}
+}
+
+// TestRewardsByAlgo is the core regression test for the chart-reshaping layer: it
+// seeds two algos with deliberately distinct reward magnitudes in the same bucket so
+// that an (incorrect) single blended sum across all algos would be nowhere near
+// either algo's true sum, making a regression to a blended shape unmistakable.
+func TestRewardsByAlgo(t *testing.T) {
+	database := setupTestDB(t)
+	ctx := context.Background()
+
+	// Bucket [0,999]: RXM 1_000_000 + 2_000_000 = 3_000_000; SHA3X 10 + 20 = 30.
+	seedBlockWithReward(t, database, 0, "RXM", nil, 1_000_000)
+	seedBlockWithReward(t, database, 1, "RXM", nil, 2_000_000)
+	seedBlockWithReward(t, database, 2, "SHA3X", nil, 10)
+	seedBlockWithReward(t, database, 3, "SHA3X", nil, 20)
+	// Bucket [1000,1999]: RXM only.
+	seedBlockWithReward(t, database, 1000, "RXM", nil, 500_000)
+
+	points, order, err := RewardsByAlgo(ctx, database, 1000, 0, 1999)
+	if err != nil {
+		t.Fatalf("RewardsByAlgo: %v", err)
+	}
+	if len(order) != len(AlgoOrder) {
+		t.Fatalf("order = %v, want %v", order, AlgoOrder)
+	}
+	if len(points) != 2 {
+		t.Fatalf("len(points) = %d, want 2", len(points))
+	}
+	byX := map[float64]map[string]float64{}
+	for _, p := range points {
+		byX[p.X] = p.Series
+	}
+	b0, ok := byX[0]
+	if !ok {
+		t.Fatalf("missing bucket 0 in points: %+v", points)
+	}
+	if b0["RXM"] != 3_000_000 {
+		t.Errorf("bucket 0 RXM = %v, want 3000000", b0["RXM"])
+	}
+	if b0["SHA3X"] != 30 {
+		t.Errorf("bucket 0 SHA3X = %v, want 30", b0["SHA3X"])
+	}
+	if b0["RXT"] != 0 || b0["C29"] != 0 {
+		t.Errorf("bucket 0 RXT/C29 = %v/%v, want both 0", b0["RXT"], b0["C29"])
+	}
+	b1, ok := byX[1000]
+	if !ok {
+		t.Fatalf("missing bucket 1000 in points: %+v", points)
+	}
+	if b1["RXM"] != 500_000 {
+		t.Errorf("bucket 1000 RXM = %v, want 500000", b1["RXM"])
+	}
+}
+
+// TestRewardsByPool_WithMappings proves the WUF-family folding mechanism works
+// identically for reward sums as it does for PoolShare's block counts (see
+// TestPoolShare_WithMappings above, which this mirrors): multiple distinct
+// WUF-prefixed pool_tag values must be summed together into one "Jagtech" series,
+// while a non-WUF pool tag and a NULL pool_tag remain their own separate series.
+func TestRewardsByPool_WithMappings(t *testing.T) {
+	database := setupTestDB(t)
+	ctx := context.Background()
+
+	e0, s1 := strPtr("WUFJagtechE0"), strPtr("WUFJagtechS1")
+	other := strPtr("pool.kryptex.com")
+	seedBlockWithReward(t, database, 0, "RXM", e0, 1_000_000)
+	seedBlockWithReward(t, database, 1, "RXT", s1, 2_000_000)
+	seedBlockWithReward(t, database, 2, "RXM", other, 3_000_000)
+	seedBlockWithReward(t, database, 3, "RXM", nil, 4_000_000)
+
+	mappings := []db.PoolTagMapping{{MatchPrefix: "WUF", CanonicalName: "Jagtech"}}
+	points, order, err := RewardsByPool(ctx, database, 1000, 0, 999, 8, mappings)
+	if err != nil {
+		t.Fatalf("RewardsByPool: %v", err)
+	}
+	if len(points) != 1 {
+		t.Fatalf("len(points) = %d, want 1", len(points))
+	}
+	series := points[0].Series
+	if series["Jagtech"] != 3_000_000 {
+		t.Errorf("Jagtech = %v, want 3000000 (1000000+2000000)", series["Jagtech"])
+	}
+	if series["pool.kryptex.com"] != 3_000_000 {
+		t.Errorf("pool.kryptex.com = %v, want 3000000", series["pool.kryptex.com"])
+	}
+	if series["unknown"] != 4_000_000 {
+		t.Errorf("unknown = %v, want 4000000", series["unknown"])
+	}
+	wantOrder := []string{"Jagtech", "pool.kryptex.com", "unknown"}
+	if len(order) != len(wantOrder) {
+		t.Fatalf("order = %v, want %v", order, wantOrder)
+	}
+}
+
+// TestRewardsByPool_TopNFoldsIntoOther proves a pool outside the topN cut has its
+// reward summed into the "other" series.
+func TestRewardsByPool_TopNFoldsIntoOther(t *testing.T) {
+	database := setupTestDB(t)
+	ctx := context.Background()
+
+	big, small := strPtr("BigPool"), strPtr("SmallPool")
+	seedBlockWithReward(t, database, 0, "RXM", big, 1_000_000)
+	seedBlockWithReward(t, database, 1, "RXM", big, 1_000_000)
+	seedBlockWithReward(t, database, 2, "RXM", big, 1_000_000)
+	seedBlockWithReward(t, database, 3, "RXM", small, 500_000)
+
+	points, _, err := RewardsByPool(ctx, database, 1000, 0, 999, 1, nil)
+	if err != nil {
+		t.Fatalf("RewardsByPool: %v", err)
+	}
+	if len(points) != 1 {
+		t.Fatalf("len(points) = %d, want 1", len(points))
+	}
+	series := points[0].Series
+	if series["BigPool"] != 3_000_000 {
+		t.Errorf("BigPool = %v, want 3000000", series["BigPool"])
+	}
+	if series["other"] != 500_000 {
+		t.Errorf("other = %v, want 500000", series["other"])
+	}
+}

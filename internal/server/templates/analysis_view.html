@@ -1,6 +1,6 @@
 {{define "content"}}
 <h2>{{.Title}}</h2>
-<nav><a href="/analysis">&laquo; Analysis</a>{{if eq .Title "Pool Share"}} | <a href="/analysis/pool-algo-breakdown">Pool Algo Breakdown &raquo;</a>{{end}}</nav>
+<nav><a href="/analysis">&laquo; Analysis</a>{{if eq .Title "Pool Share"}} | <a href="/analysis/pool-algo-breakdown">Pool Algo Breakdown &raquo;</a>{{end}}{{if eq .Title "Rewards by Algo"}} | <a href="/analysis/rewards-by-pool">Rewards by Pool &raquo;</a>{{end}}{{if eq .Title "Rewards by Pool"}} | <a href="/analysis/rewards-by-algo">Rewards by Algo &raquo;</a>{{end}}</nav>
 <form method="get" style="margin: 1rem 0; color:#999;">
     <label>Bucket size <input type="number" name="bucket_size" value="{{.Params.BucketSize}}" min="1" style="width:8rem;"></label>
     <label>From <input type="number" name="from" value="{{.Params.From}}" min="0" style="width:10rem;"></label>

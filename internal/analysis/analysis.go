@@ -312,3 +312,65 @@ func PoolAlgoBreakdown(ctx context.Context, database *db.DB, bucketSize, fromHei
 	}
 	return points, AlgoOrder, nil
 }
+
+// RewardsByAlgo loads db.RewardBucketCountsByAlgo for [fromHeight, toHeight] and
+// reshapes it into chartrender.Points (one per bucket, one Series entry per pow-algo)
+// ready for chartrender.StackedAreaChart, plus the series order/name list to pass
+// alongside it - the same 4-series RXM/RXT/C29/SHA3X shape as AlgoDistribution, but
+// each bucket's per-algo value is the SUM of reward_micro_minotari for that algo's
+// blocks in the bucket rather than a block count. Values are raw MicroMinotari
+// (uint64, see migrations/0008_reward_micro_minotari.up.sql) - display-layer XTM
+// conversion happens in internal/server via formatMicroMinotari, not here.
+func RewardsByAlgo(ctx context.Context, database *db.DB, bucketSize, fromHeight, toHeight uint64) ([]chartrender.Point, []string, error) {
+	rows, err := database.RewardBucketCountsByAlgo(ctx, bucketSize, fromHeight, toHeight)
+	if err != nil {
+		return nil, nil, fmt.Errorf("analysis: rewards by algo: %w", err)
+	}
+	points := make([]chartrender.Point, len(rows))
+	for i, r := range rows {
+		points[i] = chartrender.Point{
+			X: float64(r.BucketStart),
+			Series: map[string]float64{
+				"RXM":   float64(r.RXM),
+				"RXT":   float64(r.RXT),
+				"C29":   float64(r.C29),
+				"SHA3X": float64(r.SHA3X),
+			},
+		}
+	}
+	return points, AlgoOrder, nil
+}
+
+// RewardsByPool loads db.RewardBucketCountsByPool for [fromHeight, toHeight] (capped to
+// topN distinct mapped pool tags, ranked by block count exactly like PoolShare - see
+// db.RewardBucketCountsByPool) and reshapes its "long" row format into
+// chartrender.Points plus a deterministic series order, mirroring PoolShare's own
+// reshaping/ordering logic exactly (see that function's doc comment) but summing
+// reward_micro_minotari instead of counting blocks. mappings folds known tag families
+// the same way PoolShare does; pass nil to disable folding entirely.
+func RewardsByPool(ctx context.Context, database *db.DB, bucketSize, fromHeight, toHeight uint64, topN int, mappings []db.PoolTagMapping) ([]chartrender.Point, []string, error) {
+	rows, err := database.RewardBucketCountsByPool(ctx, bucketSize, fromHeight, toHeight, topN, mappings)
+	if err != nil {
+		return nil, nil, fmt.Errorf("analysis: rewards by pool: %w", err)
+	}
+
+	pointsByBucket := map[uint64]map[string]float64{}
+	var bucketOrder []uint64
+	totals := map[string]int64{}
+	for _, r := range rows {
+		if _, ok := pointsByBucket[r.BucketStart]; !ok {
+			pointsByBucket[r.BucketStart] = map[string]float64{}
+			bucketOrder = append(bucketOrder, r.BucketStart)
+		}
+		pointsByBucket[r.BucketStart][r.PoolTag] += float64(r.Reward)
+		totals[r.PoolTag] += int64(r.Reward)
+	}
+
+	seriesOrder := poolSeriesOrder(totals)
+
+	points := make([]chartrender.Point, len(bucketOrder))
+	for i, bucket := range bucketOrder {
+		points[i] = chartrender.Point{X: float64(bucket), Series: pointsByBucket[bucket]}
+	}
+	return points, seriesOrder, nil
+}
