@@ -151,6 +151,13 @@ type Block struct {
 	KernelCount int32
 	OutputCount int32
 	PoolTag     *string // nil == unattributed
+
+	// RewardMicroMinotari is the coinbase output's minimum_value_promise (raw
+	// MicroMinotari, uint64 wire type) - see migrations/0008_reward_micro_minotari.up.sql
+	// for the full derivation and why 0 means "unknown" (BulletProofPlus-hidden), not
+	// "no reward". Zero for any block indexed before that migration until backfilled
+	// (see cmd/reindex-rewards) or for a block with no coinbase output at all.
+	RewardMicroMinotari uint64
 }
 
 // UpsertBlock inserts or updates a single block row, keyed on height. Used by the
@@ -162,9 +169,9 @@ func (d *DB) UpsertBlock(ctx context.Context, b Block) error {
 			output_mr, block_output_mr, kernel_mr, input_mr, total_kernel_offset, nonce,
 			pow_algo_raw, pow_data,
 			kernel_mmr_size, output_mmr_size, total_script_offset, validator_node_mr, validator_node_size,
-			pow_algo, difficulty, kernel_count, output_count, pool_tag
+			pow_algo, difficulty, kernel_count, output_count, pool_tag, reward_micro_minotari
 		)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24)
 		ON CONFLICT (height) DO UPDATE SET
 			hash = EXCLUDED.hash,
 			version = EXCLUDED.version,
@@ -187,13 +194,14 @@ func (d *DB) UpsertBlock(ctx context.Context, b Block) error {
 			difficulty = EXCLUDED.difficulty,
 			kernel_count = EXCLUDED.kernel_count,
 			output_count = EXCLUDED.output_count,
-			pool_tag = EXCLUDED.pool_tag
+			pool_tag = EXCLUDED.pool_tag,
+			reward_micro_minotari = EXCLUDED.reward_micro_minotari
 	`,
 		b.Height, b.Hash, b.Version, b.PrevHash, b.Timestamp,
 		nonNilBytes(b.OutputMr), nonNilBytes(b.BlockOutputMr), nonNilBytes(b.KernelMr), nonNilBytes(b.InputMr), nonNilBytes(b.TotalKernelOffset), b.Nonce,
 		b.PowAlgoRaw, nonNilBytes(b.PowData),
 		b.KernelMmrSize, b.OutputMmrSize, nonNilBytes(b.TotalScriptOffset), nonNilBytes(b.ValidatorNodeMr), b.ValidatorNodeSize,
-		b.PowAlgo, b.Difficulty, b.KernelCount, b.OutputCount, b.PoolTag,
+		b.PowAlgo, b.Difficulty, b.KernelCount, b.OutputCount, b.PoolTag, b.RewardMicroMinotari,
 	)
 	if err != nil {
 		return fmt.Errorf("db: upsert block %d: %w", b.Height, err)
@@ -209,7 +217,7 @@ const blockColumns = `
 	output_mr, block_output_mr, kernel_mr, input_mr, total_kernel_offset, nonce,
 	pow_algo_raw, pow_data,
 	kernel_mmr_size, output_mmr_size, total_script_offset, validator_node_mr, validator_node_size,
-	pow_algo, difficulty, kernel_count, output_count, pool_tag
+	pow_algo, difficulty, kernel_count, output_count, pool_tag, reward_micro_minotari
 `
 
 // scanBlockRow scans a row shaped like blockColumns into a Block.
@@ -219,7 +227,7 @@ func scanBlockRow(row pgx.Row, b *Block) error {
 		&b.OutputMr, &b.BlockOutputMr, &b.KernelMr, &b.InputMr, &b.TotalKernelOffset, &b.Nonce,
 		&b.PowAlgoRaw, &b.PowData,
 		&b.KernelMmrSize, &b.OutputMmrSize, &b.TotalScriptOffset, &b.ValidatorNodeMr, &b.ValidatorNodeSize,
-		&b.PowAlgo, &b.Difficulty, &b.KernelCount, &b.OutputCount, &b.PoolTag,
+		&b.PowAlgo, &b.Difficulty, &b.KernelCount, &b.OutputCount, &b.PoolTag, &b.RewardMicroMinotari,
 	)
 }
 
@@ -373,6 +381,47 @@ func (d *DB) SetPoolTag(ctx context.Context, height uint64, poolTag *string) err
 		return fmt.Errorf("db: set pool tag for block %d: %w", height, err)
 	}
 	return nil
+}
+
+// SetRewardMicroMinotari updates just the reward_micro_minotari column for a single
+// block, keyed on height. Deliberately narrow (mirrors SetPoolTag's own rationale)
+// rather than requiring a full UpsertBlock; this is the only method
+// cmd/reindex-rewards touches, so a scoped backfill of this one derived column never
+// needs (or risks overwriting) any other column on the row.
+func (d *DB) SetRewardMicroMinotari(ctx context.Context, height uint64, rewardMicroMinotari uint64) error {
+	_, err := d.Pool.Exec(ctx, `UPDATE blocks SET reward_micro_minotari = $1 WHERE height = $2`, rewardMicroMinotari, height)
+	if err != nil {
+		return fmt.Errorf("db: set reward micro minotari for block %d: %w", height, err)
+	}
+	return nil
+}
+
+// RewardsForHeightRange returns a map of height -> reward_micro_minotari for every
+// block in [fromHeight, toHeight] (inclusive) - the narrow read cmd/reindex-rewards
+// needs to diff a freshly-fetched-from-GRPC reward value against what's currently
+// stored, so it can log/skip a no-op update (see SetRewardMicroMinotari) without
+// pulling the full Block row (mirrors CoinbaseExtraForHeightRange's own
+// narrower-than-GetBlock rationale for the same reattribute/reindex-tool use case).
+func (d *DB) RewardsForHeightRange(ctx context.Context, fromHeight, toHeight uint64) (map[uint64]uint64, error) {
+	rows, err := d.Pool.Query(ctx, `
+		SELECT height, reward_micro_minotari
+		FROM blocks
+		WHERE height BETWEEN $1 AND $2
+	`, fromHeight, toHeight)
+	if err != nil {
+		return nil, fmt.Errorf("db: rewards for height range: %w", err)
+	}
+	defer rows.Close()
+
+	out := make(map[uint64]uint64)
+	for rows.Next() {
+		var height, reward uint64
+		if err := rows.Scan(&height, &reward); err != nil {
+			return nil, fmt.Errorf("db: rewards for height range: scan: %w", err)
+		}
+		out[height] = reward
+	}
+	return out, rows.Err()
 }
 
 // Kernel is the row shape for the `kernels` table: one row per
@@ -882,6 +931,159 @@ func (d *DB) AlgoBucketCountsForPool(ctx context.Context, bucketSize uint64, fro
 		var r AlgoBucketRow
 		if err := rows.Scan(&r.BucketStart, &r.RXM, &r.RXT, &r.C29, &r.SHA3X); err != nil {
 			return nil, fmt.Errorf("db: algo bucket counts for pool: scan: %w", err)
+		}
+		r.BucketEnd = r.BucketStart + bucketSize - 1
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
+// RewardBucketRow is one row of the height-bucketed reward-by-algo aggregation report:
+// a [BucketStart, BucketEnd] inclusive height range, plus the SUM of
+// reward_micro_minotari (raw MicroMinotari, see migrations/0008_reward_micro_minotari
+// .up.sql) for blocks in that range attributed to each of the four known
+// internal/poolattr.PowAlgo values. Structurally identical to AlgoBucketRow, just
+// summing a value column instead of counting rows - see RewardBucketCountsByAlgo.
+type RewardBucketRow struct {
+	BucketStart uint64
+	BucketEnd   uint64
+	RXM         uint64
+	RXT         uint64
+	C29         uint64
+	SHA3X       uint64
+}
+
+// RewardBucketCountsByAlgo groups blocks in [fromHeight, toHeight] (inclusive) into the
+// same height buckets as AlgoBucketCounts and, per bucket, sums reward_micro_minotari
+// separately for each of the four known pow_algo values via FILTER-clause conditional
+// SUM (mirrors AlgoBucketCounts' FILTER pattern exactly, substituting
+// SUM(reward_micro_minotari) for COUNT(*)), aggregated entirely in Postgres. A blocks
+// with reward_micro_minotari = 0 (no coinbase, or a BulletProofPlus-hidden reward - see
+// the migration's doc comment) simply contributes 0 to its bucket/algo's sum, same as
+// any other real 0 value would - this method has no way to distinguish "unknown" zeros
+// from genuine zeros, by design (see the migration for why). bucketSize must be > 0.
+func (d *DB) RewardBucketCountsByAlgo(ctx context.Context, bucketSize uint64, fromHeight, toHeight uint64) ([]RewardBucketRow, error) {
+	if bucketSize == 0 {
+		return nil, fmt.Errorf("db: reward bucket counts by algo: bucket size must be > 0")
+	}
+
+	rows, err := d.Pool.Query(ctx, `
+		SELECT
+			(height / $1) * $1 AS bucket_start,
+			COALESCE(SUM(reward_micro_minotari) FILTER (WHERE pow_algo = 'RXM'), 0)   AS rxm,
+			COALESCE(SUM(reward_micro_minotari) FILTER (WHERE pow_algo = 'RXT'), 0)   AS rxt,
+			COALESCE(SUM(reward_micro_minotari) FILTER (WHERE pow_algo = 'C29'), 0)   AS c29,
+			COALESCE(SUM(reward_micro_minotari) FILTER (WHERE pow_algo = 'SHA3X'), 0) AS sha3x
+		FROM blocks
+		WHERE height BETWEEN $2 AND $3
+		GROUP BY bucket_start
+		ORDER BY bucket_start ASC
+	`, bucketSize, fromHeight, toHeight)
+	if err != nil {
+		return nil, fmt.Errorf("db: reward bucket counts by algo: %w", err)
+	}
+	defer rows.Close()
+
+	var out []RewardBucketRow
+	for rows.Next() {
+		var r RewardBucketRow
+		if err := rows.Scan(&r.BucketStart, &r.RXM, &r.RXT, &r.C29, &r.SHA3X); err != nil {
+			return nil, fmt.Errorf("db: reward bucket counts by algo: scan: %w", err)
+		}
+		r.BucketEnd = r.BucketStart + bucketSize - 1
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
+// RewardPoolBucketRow is one (bucket, pool) row of the height-bucketed reward-by-pool
+// report: the SUM of reward_micro_minotari for blocks in [BucketStart, BucketEnd]
+// attributed to PoolTag. PoolTag follows the exact same "unknown"/"other"/real-tag
+// convention as PoolShareBucketRow (see that type's doc comment) - this is the same
+// "long" row shape for the same reason (an open-ended, data-dependent pool_tag set).
+type RewardPoolBucketRow struct {
+	BucketStart uint64
+	BucketEnd   uint64
+	PoolTag     string
+	Reward      uint64
+}
+
+// RewardBucketCountsByPool is PoolShareBucketCounts's exact mapping/topN/bucketing
+// mechanism (see that method's doc comment for the full rationale, which applies
+// unchanged here), but summing reward_micro_minotari per bucket+pool instead of
+// counting blocks - the only difference is the final SELECT's aggregate expression
+// (SUM instead of COUNT) and its FROM clause pulling reward_micro_minotari through the
+// mapped/classified CTEs. topN ranking is still by block COUNT (not by summed reward)
+// deliberately, so the top-N pool selection is identical between the pool-share and
+// rewards-by-pool views - a pool's "top" status shouldn't flip depending on which
+// metric happens to be charted. bucketSize must be > 0 and topN must be >= 0.
+func (d *DB) RewardBucketCountsByPool(ctx context.Context, bucketSize uint64, fromHeight, toHeight uint64, topN int, mappings []PoolTagMapping) ([]RewardPoolBucketRow, error) {
+	if bucketSize == 0 {
+		return nil, fmt.Errorf("db: reward bucket counts by pool: bucket size must be > 0")
+	}
+	if topN < 0 {
+		return nil, fmt.Errorf("db: reward bucket counts by pool: topN must be >= 0")
+	}
+
+	// args/caseClauses construction mirrors PoolShareBucketCounts exactly - see that
+	// method's doc comment for why this is built dynamically per mapping entry.
+	args := []interface{}{bucketSize, fromHeight, toHeight, topN}
+	var caseClauses strings.Builder
+	for _, m := range mappings {
+		args = append(args, m.MatchPrefix+"%", m.CanonicalName)
+		patternParam := len(args) - 1
+		nameParam := len(args)
+		fmt.Fprintf(&caseClauses, "\n				WHEN pool_tag LIKE $%d THEN $%d", patternParam, nameParam)
+	}
+
+	query := fmt.Sprintf(`
+		WITH mapped AS (
+			SELECT
+				height,
+				reward_micro_minotari,
+				CASE
+					WHEN pool_tag IS NULL THEN NULL%s
+					ELSE pool_tag
+				END AS mapped_tag
+			FROM blocks
+			WHERE height BETWEEN $2 AND $3
+		),
+		top_pools AS (
+			SELECT mapped_tag
+			FROM mapped
+			WHERE mapped_tag IS NOT NULL
+			GROUP BY mapped_tag
+			ORDER BY COUNT(*) DESC
+			LIMIT $4
+		),
+		classified AS (
+			SELECT
+				(height / $1) * $1 AS bucket_start,
+				reward_micro_minotari,
+				CASE
+					WHEN mapped_tag IS NULL THEN 'unknown'
+					WHEN mapped_tag IN (SELECT mapped_tag FROM top_pools) THEN mapped_tag
+					ELSE 'other'
+				END AS pool_key
+			FROM mapped
+		)
+		SELECT bucket_start, pool_key, SUM(reward_micro_minotari) AS total_reward
+		FROM classified
+		GROUP BY bucket_start, pool_key
+		ORDER BY bucket_start ASC, pool_key ASC
+	`, caseClauses.String())
+
+	rows, err := d.Pool.Query(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("db: reward bucket counts by pool: %w", err)
+	}
+	defer rows.Close()
+
+	var out []RewardPoolBucketRow
+	for rows.Next() {
+		var r RewardPoolBucketRow
+		if err := rows.Scan(&r.BucketStart, &r.PoolTag, &r.Reward); err != nil {
+			return nil, fmt.Errorf("db: reward bucket counts by pool: scan: %w", err)
 		}
 		r.BucketEnd = r.BucketStart + bucketSize - 1
 		out = append(out, r)

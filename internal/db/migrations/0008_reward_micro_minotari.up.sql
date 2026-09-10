@@ -1,0 +1,31 @@
+-- 0008_reward_micro_minotari: adds a single per-block reward-value column to `blocks`,
+-- enabling the new "Rewards by Algo" / "Rewards by Pool" analysis views.
+--
+-- Source field: a coinbase's TransactionOutput.minimum_value_promise (proto:
+-- go-tari-grpc-lib/v3's transaction.proto, field 11 on TransactionOutput; Go accessor
+-- TransactionOutput.GetMinimumValuePromise() uint64) - see
+-- base_layer/transaction_components/src/coinbase_builder.rs in Tari core for how this
+-- is populated. Whenever the coinbase uses RangeProofType::RevealedValue (every
+-- own-pool/fleet mining binary in this ecosystem sets RevealedValueProof: true when
+-- building NewBlockCoinbase - see internal/indexer.go's indexBlock doc comment),
+-- minimum_value_promise holds the EXACT reward+fees value in cleartext MicroMinotari.
+-- If the coinbase instead uses RangeProofType::BulletProofPlus (unattributed/unknown
+-- miners, typically), minimum_value_promise reads 0 - the real value is hidden in the
+-- (unreconstructable without keys) range proof. This is a genuine protocol
+-- limitation, not a bug in this column: a 0 here means "unknown", never "no reward".
+--
+-- Column added directly to `blocks` (not a separate table) since it's a single
+-- per-block scalar exactly like `difficulty` already is - avoids a join for every
+-- rewards-by-X query. Stored as the raw uint64 MicroMinotari wire value (BIGINT, same
+-- "no observed overflow risk" convention already used for `difficulty`/other wire
+-- uint64/uint32 columns throughout this schema - see 0002's header-decomposition doc
+-- comment) - NOT converted to XTM float here. XTM conversion stays a display-layer
+-- concern (internal/server's formatMicroMinotari), matching every other monetary value
+-- in this schema (see e.g. kernels.fee).
+--
+-- Backfill: historical blocks indexed before this migration all default to 0 (which,
+-- per the "0 == unknown" convention above, is indistinguishable from a real
+-- BulletProofPlus-hidden reward until backfilled) - see cmd/reindex-rewards for the
+-- one-shot GRPC-driven backfill tool that populates this column for already-indexed
+-- heights without re-running the full indexer/pool-attribution backfill.
+ALTER TABLE blocks ADD COLUMN IF NOT EXISTS reward_micro_minotari BIGINT NOT NULL DEFAULT 0;
