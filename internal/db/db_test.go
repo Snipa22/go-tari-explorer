@@ -789,3 +789,262 @@ func bytesOf(n int, fill byte) []byte {
 	}
 	return b
 }
+
+// seedBlockWithReward inserts a minimal valid `blocks` row at height with caller-
+// supplied powAlgo/poolTag/rewardMicroMinotari - used by the reward-bucket tests below,
+// which need to control those three fields to exercise the SUM-per-algo and
+// SUM-per-pool aggregations.
+func seedBlockWithReward(t *testing.T, d *DB, height uint64, powAlgo string, poolTag *string, rewardMicroMinotari uint64) {
+	t.Helper()
+	err := d.UpsertBlock(context.Background(), Block{
+		Height:              height,
+		Hash:                "aa",
+		PrevHash:            "bb",
+		OutputMr:            []byte{},
+		BlockOutputMr:       []byte{},
+		KernelMr:            []byte{},
+		InputMr:             []byte{},
+		TotalKernelOffset:   []byte{},
+		TotalScriptOffset:   []byte{},
+		ValidatorNodeMr:     []byte{},
+		PowData:             []byte{},
+		PowAlgo:             powAlgo,
+		PoolTag:             poolTag,
+		RewardMicroMinotari: rewardMicroMinotari,
+	})
+	if err != nil {
+		t.Fatalf("db: seed block %d with reward: %v", height, err)
+	}
+}
+
+// TestRewardBucketCountsByAlgo_PerAlgoDistinct is the core regression test for
+// per-algo reward summing: it seeds two algos with deliberately distinct reward
+// magnitudes in the same bucket so that an (incorrect) single blended sum across all
+// four algo columns would be nowhere near either algo's true sum, making a regression
+// to a blended shape unmistakable.
+func TestRewardBucketCountsByAlgo_PerAlgoDistinct(t *testing.T) {
+	d := openTestDB(t)
+	ctx := context.Background()
+
+	// Bucket [0,999]: RXM 1_000_000 + 2_000_000 = 3_000_000; SHA3X 10 + 20 = 30.
+	seedBlockWithReward(t, d, 0, "RXM", nil, 1_000_000)
+	seedBlockWithReward(t, d, 1, "RXM", nil, 2_000_000)
+	seedBlockWithReward(t, d, 2, "SHA3X", nil, 10)
+	seedBlockWithReward(t, d, 3, "SHA3X", nil, 20)
+
+	rows, err := d.RewardBucketCountsByAlgo(ctx, 1000, 0, 999)
+	if err != nil {
+		t.Fatalf("RewardBucketCountsByAlgo: %v", err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("len(rows) = %d, want 1", len(rows))
+	}
+	r := rows[0]
+	if r.RXM != 3_000_000 {
+		t.Errorf("RXM = %d, want 3000000", r.RXM)
+	}
+	if r.SHA3X != 30 {
+		t.Errorf("SHA3X = %d, want 30", r.SHA3X)
+	}
+	if r.RXT != 0 || r.C29 != 0 {
+		t.Errorf("expected RXT/C29 (zero blocks) to sum to 0, got RXT=%d C29=%d", r.RXT, r.C29)
+	}
+}
+
+// TestRewardBucketCountsByAlgo_ZeroRewardBlockContributesZero proves a block with
+// reward_micro_minotari = 0 (unattributed/BulletProofPlus-hidden - see
+// migrations/0008_reward_micro_minotari.up.sql) contributes 0 to its bucket/algo sum
+// rather than being excluded from the aggregation entirely (unlike
+// DifficultyBucketAvg's *float64-nil-for-zero-rows convention - this is a SUM, not an
+// AVG, and a genuine 0 contributes 0 to a sum the same as any other value would).
+func TestRewardBucketCountsByAlgo_ZeroRewardBlockContributesZero(t *testing.T) {
+	d := openTestDB(t)
+	ctx := context.Background()
+
+	seedBlockWithReward(t, d, 0, "RXM", nil, 0)
+	seedBlockWithReward(t, d, 1, "RXM", nil, 5_000_000)
+
+	rows, err := d.RewardBucketCountsByAlgo(ctx, 1000, 0, 999)
+	if err != nil {
+		t.Fatalf("RewardBucketCountsByAlgo: %v", err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("len(rows) = %d, want 1", len(rows))
+	}
+	if rows[0].RXM != 5_000_000 {
+		t.Errorf("RXM = %d, want 5000000 (0 + 5000000)", rows[0].RXM)
+	}
+}
+
+// TestRewardBucketCountsByAlgo_EmptyBucketIsZero proves a bucket with zero blocks
+// for every algo doesn't appear in the result at all (mirrors AlgoBucketCounts'
+// GROUP BY-driven "no row for an empty bucket" behavior) - this test only seeds
+// blocks outside the queried range to prove that range filtering, not aggregation,
+// is what's doing the work.
+func TestRewardBucketCountsByAlgo_EmptyBucketIsZero(t *testing.T) {
+	d := openTestDB(t)
+	ctx := context.Background()
+
+	seedBlockWithReward(t, d, 5000, "RXM", nil, 1_000_000) // outside the queried range
+
+	rows, err := d.RewardBucketCountsByAlgo(ctx, 1000, 0, 999)
+	if err != nil {
+		t.Fatalf("RewardBucketCountsByAlgo: %v", err)
+	}
+	if len(rows) != 0 {
+		t.Fatalf("expected 0 rows for an empty queried range, got %d: %+v", len(rows), rows)
+	}
+}
+
+// TestRewardBucketCountsByAlgo_RejectsZeroBucketSize proves bucketSize == 0 is
+// rejected up front, matching AlgoBucketCounts' own validation.
+func TestRewardBucketCountsByAlgo_RejectsZeroBucketSize(t *testing.T) {
+	d := openTestDB(t)
+	ctx := context.Background()
+	if _, err := d.RewardBucketCountsByAlgo(ctx, 0, 0, 999); err == nil {
+		t.Fatal("expected error for bucket size 0")
+	}
+}
+
+// TestRewardBucketCountsByPool_SumsPerMappedPool proves the WUF-family folding
+// mechanism (see PoolTagMapping's doc comment) works identically for reward sums as
+// it does for pool-share block counts: multiple distinct WUF-prefixed pool_tag values
+// must be summed together into one "Jagtech" series.
+func TestRewardBucketCountsByPool_SumsPerMappedPool(t *testing.T) {
+	d := openTestDB(t)
+	ctx := context.Background()
+
+	e0, s1 := "WUFJagtechE0", "WUFJagtechS1"
+	other := "OtherPool"
+	seedBlockWithReward(t, d, 0, "RXM", &e0, 1_000_000)
+	seedBlockWithReward(t, d, 1, "RXM", &s1, 2_000_000)
+	seedBlockWithReward(t, d, 2, "RXM", &other, 3_000_000)
+	seedBlockWithReward(t, d, 3, "RXM", nil, 4_000_000) // unknown
+
+	mappings := []PoolTagMapping{{MatchPrefix: "WUF", CanonicalName: "Jagtech"}}
+	rows, err := d.RewardBucketCountsByPool(ctx, 1000, 0, 999, 8, mappings)
+	if err != nil {
+		t.Fatalf("RewardBucketCountsByPool: %v", err)
+	}
+	byPool := map[string]uint64{}
+	for _, r := range rows {
+		byPool[r.PoolTag] = r.Reward
+	}
+	if byPool["Jagtech"] != 3_000_000 {
+		t.Errorf("Jagtech = %d, want 3000000 (1000000+2000000)", byPool["Jagtech"])
+	}
+	if byPool["OtherPool"] != 3_000_000 {
+		t.Errorf("OtherPool = %d, want 3000000", byPool["OtherPool"])
+	}
+	if byPool["unknown"] != 4_000_000 {
+		t.Errorf("unknown = %d, want 4000000", byPool["unknown"])
+	}
+}
+
+// TestRewardBucketCountsByPool_TopNFoldsIntoOther proves a pool that doesn't make the
+// topN cut (ranked by block COUNT, matching PoolShareBucketCounts' own ranking metric
+// - see RewardBucketCountsByPool's doc comment on why) has its reward folded into the
+// "other" series rather than dropped or kept as its own series.
+func TestRewardBucketCountsByPool_TopNFoldsIntoOther(t *testing.T) {
+	d := openTestDB(t)
+	ctx := context.Background()
+
+	big, small := "BigPool", "SmallPool"
+	// BigPool: 3 blocks (wins topN=1 by count). SmallPool: 1 block, folds into "other".
+	seedBlockWithReward(t, d, 0, "RXM", &big, 1_000_000)
+	seedBlockWithReward(t, d, 1, "RXM", &big, 1_000_000)
+	seedBlockWithReward(t, d, 2, "RXM", &big, 1_000_000)
+	seedBlockWithReward(t, d, 3, "RXM", &small, 500_000)
+
+	rows, err := d.RewardBucketCountsByPool(ctx, 1000, 0, 999, 1, nil)
+	if err != nil {
+		t.Fatalf("RewardBucketCountsByPool: %v", err)
+	}
+	byPool := map[string]uint64{}
+	for _, r := range rows {
+		byPool[r.PoolTag] = r.Reward
+	}
+	if byPool["BigPool"] != 3_000_000 {
+		t.Errorf("BigPool = %d, want 3000000", byPool["BigPool"])
+	}
+	if byPool["other"] != 500_000 {
+		t.Errorf("other = %d, want 500000 (SmallPool folded in)", byPool["other"])
+	}
+	if _, ok := byPool["SmallPool"]; ok {
+		t.Errorf("SmallPool must not appear as its own series once folded into other, got %+v", byPool)
+	}
+}
+
+// TestRewardBucketCountsByPool_RejectsInvalidArgs mirrors
+// PoolShareBucketCounts' own validation of bucketSize/topN.
+func TestRewardBucketCountsByPool_RejectsInvalidArgs(t *testing.T) {
+	d := openTestDB(t)
+	ctx := context.Background()
+	if _, err := d.RewardBucketCountsByPool(ctx, 0, 0, 999, 8, nil); err == nil {
+		t.Fatal("expected error for bucket size 0")
+	}
+	if _, err := d.RewardBucketCountsByPool(ctx, 1000, 0, 999, -1, nil); err == nil {
+		t.Fatal("expected error for negative topN")
+	}
+}
+
+// TestSetRewardMicroMinotari proves SetRewardMicroMinotari updates just the
+// reward_micro_minotari column for the given height, leaving other blocks untouched -
+// mirroring TestSetPoolTag's own coverage shape for its narrow single-column setter.
+func TestSetRewardMicroMinotari(t *testing.T) {
+	d := openTestDB(t)
+	ctx := context.Background()
+
+	seedBlockWithReward(t, d, 1300, "RXM", nil, 0)
+	seedBlockWithReward(t, d, 1301, "RXM", nil, 0)
+
+	if err := d.SetRewardMicroMinotari(ctx, 1300, 5_000_000_000); err != nil {
+		t.Fatalf("SetRewardMicroMinotari: %v", err)
+	}
+
+	got, err := d.GetBlock(ctx, 1300)
+	if err != nil {
+		t.Fatalf("GetBlock: %v", err)
+	}
+	if got.RewardMicroMinotari != 5_000_000_000 {
+		t.Errorf("expected reward_micro_minotari 5000000000, got %d", got.RewardMicroMinotari)
+	}
+
+	other, err := d.GetBlock(ctx, 1301)
+	if err != nil {
+		t.Fatalf("GetBlock 1301: %v", err)
+	}
+	if other.RewardMicroMinotari != 0 {
+		t.Errorf("expected height 1301's reward_micro_minotari to remain 0, got %d", other.RewardMicroMinotari)
+	}
+}
+
+// TestRewardsForHeightRange proves RewardsForHeightRange returns exactly the
+// height-bounded map of stored reward values cmd/reindex-rewards needs to diff
+// against freshly-fetched-from-GRPC values, excluding heights outside the requested
+// range.
+func TestRewardsForHeightRange(t *testing.T) {
+	d := openTestDB(t)
+	ctx := context.Background()
+
+	seedBlockWithReward(t, d, 1400, "RXM", nil, 1_000_000)
+	seedBlockWithReward(t, d, 1401, "RXM", nil, 0)
+	seedBlockWithReward(t, d, 1500, "RXM", nil, 9_999_999) // outside the queried range
+
+	got, err := d.RewardsForHeightRange(ctx, 1400, 1401)
+	if err != nil {
+		t.Fatalf("RewardsForHeightRange: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("expected 2 entries, got %d: %+v", len(got), got)
+	}
+	if got[1400] != 1_000_000 {
+		t.Errorf("height 1400 = %d, want 1000000", got[1400])
+	}
+	if got[1401] != 0 {
+		t.Errorf("height 1401 = %d, want 0", got[1401])
+	}
+	if _, ok := got[1500]; ok {
+		t.Errorf("height 1500 (outside queried range) should not be present in map")
+	}
+}

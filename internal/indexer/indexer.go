@@ -119,6 +119,7 @@ func (ix *Indexer) indexBlock(ctx context.Context, block *tari_generated.Block) 
 
 	var coinbaseFound, coinbaseHasFeatures bool
 	var coinbaseExtra []byte
+	var rewardMicroMinotari uint64
 	for _, output := range outputs {
 		features := output.GetFeatures()
 		if features == nil {
@@ -130,6 +131,13 @@ func (ix *Indexer) indexBlock(ctx context.Context, block *tari_generated.Block) 
 		coinbaseFound = true
 		coinbaseHasFeatures = true
 		coinbaseExtra = features.GetCoinbaseExtra()
+		// minimum_value_promise holds the exact reward+fees value in cleartext
+		// MicroMinotari whenever this coinbase used RangeProofType::RevealedValue
+		// (every own-pool/fleet mining binary in this ecosystem sets that); it reads
+		// 0 for a BulletProofPlus-hidden coinbase (unattributed/unknown miners,
+		// typically) - see migrations/0008_reward_micro_minotari.up.sql for the full
+		// derivation and why 0 here means "unknown", not "no reward".
+		rewardMicroMinotari = output.GetMinimumValuePromise()
 		break
 	}
 
@@ -150,29 +158,30 @@ func (ix *Indexer) indexBlock(ctx context.Context, block *tari_generated.Block) 
 	}
 
 	row := db.Block{
-		Height:            header.GetHeight(),
-		Hash:              fmt.Sprintf("%x", header.GetHash()),
-		Version:           header.GetVersion(),
-		PrevHash:          fmt.Sprintf("%x", header.GetPrevHash()),
-		Timestamp:         int64(header.GetTimestamp()),
-		OutputMr:          header.GetOutputMr(),
-		BlockOutputMr:     header.GetBlockOutputMr(),
-		KernelMr:          header.GetKernelMr(),
-		InputMr:           header.GetInputMr(),
-		TotalKernelOffset: header.GetTotalKernelOffset(),
-		Nonce:             header.GetNonce(),
-		KernelMmrSize:     header.GetKernelMmrSize(),
-		OutputMmrSize:     header.GetOutputMmrSize(),
-		TotalScriptOffset: header.GetTotalScriptOffset(),
-		ValidatorNodeMr:   header.GetValidatorNodeMr(),
-		ValidatorNodeSize: header.GetValidatorNodeSize(),
-		PowAlgoRaw:        rawAlgo,
-		PowData:           header.GetPow().GetPowData(),
-		PowAlgo:           string(attribution.PowAlgo),
-		Difficulty:        difficulty,
-		KernelCount:       int32(len(kernels)),
-		OutputCount:       int32(len(outputs)),
-		PoolTag:           poolTag,
+		Height:              header.GetHeight(),
+		Hash:                fmt.Sprintf("%x", header.GetHash()),
+		Version:             header.GetVersion(),
+		PrevHash:            fmt.Sprintf("%x", header.GetPrevHash()),
+		Timestamp:           int64(header.GetTimestamp()),
+		OutputMr:            header.GetOutputMr(),
+		BlockOutputMr:       header.GetBlockOutputMr(),
+		KernelMr:            header.GetKernelMr(),
+		InputMr:             header.GetInputMr(),
+		TotalKernelOffset:   header.GetTotalKernelOffset(),
+		Nonce:               header.GetNonce(),
+		KernelMmrSize:       header.GetKernelMmrSize(),
+		OutputMmrSize:       header.GetOutputMmrSize(),
+		TotalScriptOffset:   header.GetTotalScriptOffset(),
+		ValidatorNodeMr:     header.GetValidatorNodeMr(),
+		ValidatorNodeSize:   header.GetValidatorNodeSize(),
+		PowAlgoRaw:          rawAlgo,
+		PowData:             header.GetPow().GetPowData(),
+		PowAlgo:             string(attribution.PowAlgo),
+		Difficulty:          difficulty,
+		KernelCount:         int32(len(kernels)),
+		OutputCount:         int32(len(outputs)),
+		PoolTag:             poolTag,
+		RewardMicroMinotari: rewardMicroMinotari,
 	}
 	if err := ix.DB.UpsertBlock(ctx, row); err != nil {
 		return err
