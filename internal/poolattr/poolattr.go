@@ -9,6 +9,8 @@
 package poolattr
 
 import (
+	"bytes"
+	"encoding/hex"
 	"strings"
 	"unicode"
 )
@@ -65,6 +67,13 @@ type BlockAttribution struct {
 	RawExtra    string  `json:"raw_extra"` // printable-only rendering of the raw coinbase extra bytes
 	IsOwnPool   bool    `json:"is_own_pool"`
 	Reason      Reason  `json:"reason,omitempty"` // set when PoolTag == "" (or is a generic "unknown" bucket)
+	// InstanceSuffix is the hex-encoded rendering of the raw bytes strictly after the
+	// first literal 0x00 in txExtra (capped to 8 bytes), for display/uniqueness purposes
+	// only - see the NUL-delimited coinbase-extra convention documented on ownPoolTags.
+	// Populated whenever a 0x00 was found in txExtra, regardless of which branch
+	// (own-pool match / third-party match / unknown fallback) the block lands in; left
+	// empty for legacy tags that predate the convention (no 0x00 present).
+	InstanceSuffix string `json:"instance_suffix,omitempty"`
 }
 
 // knownPrefix maps a coinbase-extra byte prefix to a human-readable pool name. Order
@@ -84,8 +93,13 @@ type knownPrefix struct {
 // tags are; supportxtm-*'s aren't - see the doc comments below), so truncation length
 // has to travel with the specific prefix, not be a single package-level constant.
 type ownPoolTag struct {
-	prefix        string // exact byte prefix to match via strings.HasPrefix against txExtra
-	tagLen        int    // exact truncation length for this specific prefix's tags
+	prefix string // exact byte prefix to match via strings.HasPrefix against txExtra
+	// tagLen is the exact truncation length for this specific prefix's tags. A
+	// sentinel value of 0 (or less) means "no truncation - use the exact matched
+	// base-tag string as-is". No real tag today is 0 bytes long, so 0 is safe to
+	// reserve as the sentinel. See the NUL-delimited-suffix entries in ownPoolTags
+	// below for why some rows use this sentinel instead of a real byte count.
+	tagLen        int
 	canonicalName string // canonical display name for this own-pool family (see below)
 }
 
@@ -155,11 +169,36 @@ type ownPoolTag struct {
 // fragmented pool_tag rows in the live testnet blocks table, e.g. "GCPOOL-SOLO&",
 // "GCPOOL-SOLO*fes", "GCPOOL-SOLO+N", etc., all collapsing to the one real 11-byte
 // tag once truncated here).
+// NUL-delimited suffix variants (added below, ahead of their shorter same-prefix
+// counterparts): go-crypto-pool's leaf-solo/leaf-direct binaries are moving to a new
+// coinbase-extra wire format of "<base-tag-string><one literal 0x00 byte><4
+// cryptographically-random bytes>" (e.g. "supportxtm-rxt-pplns\x00\xA1\xB2\xC3\xD4").
+// attributeExtra recovers the base tag by splitting the RAW txExtra on the first 0x00
+// byte, which gives an exact, unambiguous tag boundary - so these new
+// "supportxtm-<algo>-pplns"/"-solo" rows use the tagLen==0 sentinel (no truncation,
+// use the exact matched base string) instead of a hardcoded byte count. tagLen
+// truncation is kept ONLY as a safety net for the legacy/no-NUL-delimiter path on the
+// original short "supportxtm-<algo>" prefixes above (to preserve existing DB
+// attribution behavior for old blocks that predate this convention); these new rows
+// don't need it since the NUL delimiter itself already gives a clean boundary.
+//
+// Each pplns/solo row MUST be listed before its shorter same-prefix counterpart (e.g.
+// "supportxtm-sha3x-pplns" before "supportxtm-sha3x") because matching is
+// first-match-wins via strings.HasPrefix in declaration order, and
+// "supportxtm-sha3x-pplns" also has "supportxtm-sha3x" as a prefix.
 var ownPoolTags = []ownPoolTag{
 	{prefix: "WUF", tagLen: 12, canonicalName: "Jagtech"},
+	{prefix: "supportxtm-sha3x-pplns", tagLen: 0, canonicalName: "SupportXTM"},
+	{prefix: "supportxtm-sha3x-solo", tagLen: 0, canonicalName: "SupportXTM"},
 	{prefix: "supportxtm-sha3x", tagLen: 16, canonicalName: "SupportXTM"},
+	{prefix: "supportxtm-c29-pplns", tagLen: 0, canonicalName: "SupportXTM"},
+	{prefix: "supportxtm-c29-solo", tagLen: 0, canonicalName: "SupportXTM"},
 	{prefix: "supportxtm-c29", tagLen: 14, canonicalName: "SupportXTM"},
+	{prefix: "supportxtm-rxt-pplns", tagLen: 0, canonicalName: "SupportXTM"},
+	{prefix: "supportxtm-rxt-solo", tagLen: 0, canonicalName: "SupportXTM"},
 	{prefix: "supportxtm-rxt", tagLen: 14, canonicalName: "SupportXTM"},
+	{prefix: "supportxtm-rxm-pplns", tagLen: 0, canonicalName: "SupportXTM"},
+	{prefix: "supportxtm-rxm-solo", tagLen: 0, canonicalName: "SupportXTM"},
 	{prefix: "supportxtm-rxm", tagLen: 14, canonicalName: "SupportXTM"},
 	{prefix: "GCPOOL-SOLO", tagLen: 11, canonicalName: "SupportXTM"},
 }
@@ -215,29 +254,67 @@ func Attribute(height uint64, rawAlgo uint64, hasOutputs, hasCoinbaseOutput, has
 // attributeExtra does the actual prefix-table lookup once a non-empty coinbase extra is
 // known to exist. Split out from Attribute for testability against known real-world byte
 // strings without needing to fake the surrounding block/output plumbing.
+//
+// go-crypto-pool's leaf-solo/leaf-direct binaries emit newer coinbase-extra tags in a
+// NUL-delimited wire format: "<base-tag-string><one literal 0x00 byte><4
+// cryptographically-random bytes>". Base tags are always printable ASCII and never
+// contain a literal 0x00 themselves, so the first 0x00 byte in the RAW txExtra (before
+// any printable-filtering) is an exact, unambiguous boundary between the base tag and
+// the random suffix. When present, both the ownPoolTags and prefixTable prefix matches
+// (and the truncation input for ownPoolTags rows that still use a tagLen) run against
+// txExtra[:idx] rather than the full printable-filtered string, since printable
+// filtering could mangle the raw random suffix bytes into something misleading instead
+// of cleanly excluding them. When absent, behavior is completely unchanged from before
+// this convention existed - this is the mandatory backward-compat path for every
+// legacy/third-party tag that predates it.
 func attributeExtra(height uint64, algo PowAlgo, txExtra []byte) BlockAttribution {
 	raw := printableOnly(txExtra)
 
+	// matchBytes is what prefix matching (both tables) runs against. truncBase is what
+	// tagLen truncation (for ownPoolTags rows that still use one) runs against.
+	var matchBytes []byte
+	var truncBase string
+	var instanceSuffix string
+	if idx := bytes.IndexByte(txExtra, 0); idx >= 0 {
+		matchBytes = txExtra[:idx]
+		truncBase = string(matchBytes) // guaranteed printable ASCII per the wire format
+		suffix := txExtra[idx+1:]
+		if len(suffix) > 8 {
+			suffix = suffix[:8]
+		}
+		instanceSuffix = hex.EncodeToString(suffix)
+	} else {
+		matchBytes = txExtra
+		truncBase = raw // unchanged legacy behavior: truncate the printable-filtered string
+	}
+	matchStr := string(matchBytes)
+
 	for _, opt := range ownPoolTags {
-		if strings.HasPrefix(string(txExtra), opt.prefix) {
+		if strings.HasPrefix(matchStr, opt.prefix) {
+			tag := truncBase
+			if opt.tagLen > 0 {
+				tag = truncatePoolTag(truncBase, opt.tagLen)
+			}
 			return BlockAttribution{
-				BlockHeight: height,
-				PowAlgo:     algo,
-				PoolTag:     truncatePoolTag(raw, opt.tagLen),
-				RawExtra:    raw,
-				IsOwnPool:   true,
+				BlockHeight:    height,
+				PowAlgo:        algo,
+				PoolTag:        tag,
+				RawExtra:       raw,
+				IsOwnPool:      true,
+				InstanceSuffix: instanceSuffix,
 			}
 		}
 	}
 
 	for _, kp := range prefixTable {
-		if strings.HasPrefix(string(txExtra), kp.prefix) {
+		if strings.HasPrefix(matchStr, kp.prefix) {
 			return BlockAttribution{
-				BlockHeight: height,
-				PowAlgo:     algo,
-				PoolTag:     kp.poolName,
-				RawExtra:    raw,
-				IsOwnPool:   kp.isOwnPool,
+				BlockHeight:    height,
+				PowAlgo:        algo,
+				PoolTag:        kp.poolName,
+				RawExtra:       raw,
+				IsOwnPool:      kp.isOwnPool,
+				InstanceSuffix: instanceSuffix,
 			}
 		}
 	}
@@ -249,12 +326,13 @@ func attributeExtra(height uint64, algo PowAlgo, txExtra []byte) BlockAttributio
 	// already-printable-filtered raw) since it becomes a real pool_tag value stored in the
 	// database, while RawExtra keeps the broader printableOnly rendering for diagnostics.
 	return BlockAttribution{
-		BlockHeight: height,
-		PowAlgo:     algo,
-		PoolTag:     asciiPrintableOnly(txExtra),
-		RawExtra:    raw,
-		IsOwnPool:   false,
-		Reason:      ReasonUnknownTxExtra,
+		BlockHeight:    height,
+		PowAlgo:        algo,
+		PoolTag:        asciiPrintableOnly(txExtra),
+		RawExtra:       raw,
+		IsOwnPool:      false,
+		Reason:         ReasonUnknownTxExtra,
+		InstanceSuffix: instanceSuffix,
 	}
 }
 
