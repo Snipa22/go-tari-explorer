@@ -122,6 +122,107 @@ func TestAttribute_KnownTags(t *testing.T) {
 	}
 }
 
+// TestAttribute_NULDelimitedTags exercises go-crypto-pool's newer coinbase-extra wire
+// format: "<base-tag-string><one literal 0x00 byte><4 cryptographically-random bytes>".
+// These are a distinct test function (rather than more TestAttribute_KnownTags rows)
+// specifically so we can assert InstanceSuffix, which the shared KnownTags table/loop
+// deliberately does not check (several of its existing cases already embed literal
+// \x00 bytes as legacy "garbage tail" filler, predating this convention, and adding a
+// blanket InstanceSuffix assertion there would incorrectly require those unrelated
+// pre-existing cases to have a specific InstanceSuffix value).
+func TestAttribute_NULDelimitedTags(t *testing.T) {
+	cases := []struct {
+		name               string
+		rawAlgo            uint64
+		extra              []byte
+		wantTag            string
+		wantOwn            bool
+		wantAlgo           PowAlgo
+		wantReason         Reason
+		wantInstanceSuffix string
+	}{
+		{
+			name:               "supportxtm rxt-pplns NUL-delimited random suffix",
+			rawAlgo:            2,
+			extra:              append([]byte("supportxtm-rxt-pplns\x00"), 0xA1, 0xB2, 0xC3, 0xD4),
+			wantTag:            "supportxtm-rxt-pplns",
+			wantOwn:            true,
+			wantAlgo:           PowAlgoRXT,
+			wantReason:         ReasonOK,
+			wantInstanceSuffix: "a1b2c3d4",
+		},
+		{
+			name:               "supportxtm sha3x-solo NUL-delimited random suffix",
+			rawAlgo:            4,
+			extra:              append([]byte("supportxtm-sha3x-solo\x00"), 0x11, 0x22, 0x33, 0x44),
+			wantTag:            "supportxtm-sha3x-solo",
+			wantOwn:            true,
+			wantAlgo:           PowAlgoSHA3X,
+			wantReason:         ReasonOK,
+			wantInstanceSuffix: "11223344",
+		},
+		{
+			name:               "supportxtm c29-pplns NUL-delimited random suffix",
+			rawAlgo:            3,
+			extra:              append([]byte("supportxtm-c29-pplns\x00"), 0xDE, 0xAD, 0xBE, 0xEF),
+			wantTag:            "supportxtm-c29-pplns",
+			wantOwn:            true,
+			wantAlgo:           PowAlgoC29,
+			wantReason:         ReasonOK,
+			wantInstanceSuffix: "deadbeef",
+		},
+		// Same base+NUL+random-suffix shape, but rxm-solo, for a second algo/suffix
+		// combination beyond the three required by the brief.
+		{
+			name:               "supportxtm rxm-solo NUL-delimited random suffix",
+			rawAlgo:            0,
+			extra:              append([]byte("supportxtm-rxm-solo\x00"), 0x01, 0x02, 0x03, 0x04),
+			wantTag:            "supportxtm-rxm-solo",
+			wantOwn:            true,
+			wantAlgo:           PowAlgoRXM,
+			wantReason:         ReasonOK,
+			wantInstanceSuffix: "01020304",
+		},
+		// Proves the no-NUL legacy fallback path is untouched: no literal 0x00 byte
+		// anywhere in extra, so this must take the exact same code path as (and produce
+		// the same InstanceSuffix-less result as) every pre-existing KnownTags case -
+		// still truncating to the short-prefix supportxtm-rxt's tagLen (14), not
+		// matching the longer NUL-delimited "supportxtm-rxt-pplns" row, and leaving
+		// InstanceSuffix empty since no 0x00 delimiter was found.
+		{
+			name:               "legacy no-NUL supportxtm-rxt tag is untouched",
+			rawAlgo:            2,
+			extra:              []byte("supportxtm-rxt-worker07-garbage-tail-no-nul-byte-here"),
+			wantTag:            "supportxtm-rxt",
+			wantOwn:            true,
+			wantAlgo:           PowAlgoRXT,
+			wantReason:         ReasonOK,
+			wantInstanceSuffix: "",
+		},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := Attribute(1000, c.rawAlgo, true, true, true, c.extra)
+			if got.PoolTag != c.wantTag {
+				t.Errorf("PoolTag = %q, want %q", got.PoolTag, c.wantTag)
+			}
+			if got.IsOwnPool != c.wantOwn {
+				t.Errorf("IsOwnPool = %v, want %v", got.IsOwnPool, c.wantOwn)
+			}
+			if got.PowAlgo != c.wantAlgo {
+				t.Errorf("PowAlgo = %q, want %q", got.PowAlgo, c.wantAlgo)
+			}
+			if got.Reason != c.wantReason {
+				t.Errorf("Reason = %q, want %q", got.Reason, c.wantReason)
+			}
+			if got.InstanceSuffix != c.wantInstanceSuffix {
+				t.Errorf("InstanceSuffix = %q, want %q", got.InstanceSuffix, c.wantInstanceSuffix)
+			}
+		})
+	}
+}
+
 // TestAttribute_FallbackPoolTagIsASCIIOnly proves that the fallback PoolTag uses the
 // stricter asciiPrintableOnly filter, not printableOnly: a non-ASCII rune that
 // unicode.IsPrint accepts (e.g. U+00E9, "é") must still be stripped from PoolTag.
