@@ -238,11 +238,11 @@ type recentBlocksStatsView struct {
 
 // algoGlanceRow is one row of the front page's "At a Glance" Algo breakdown table,
 // merging db.RecentBlocksStats' per-algo Count/AvgDifficulty (recentBlocksStatsSample
-// window) with db.LatestDifficultySnapshots' live per-algo current difficulty target
-// into a single row - see newAlgoGlanceRows. Plain fields (not embedding+methods like
-// the old algoCountRowView) since AvgDifficultyDisplay/CurrentDifficultyDisplay are
-// computed once at merge time, where the graceful zero-value defaults are simplest to
-// apply.
+// window) with db.LatestTemplateDifficultySnapshots' live per-algo NEXT-block target
+// difficulty into a single row - see newAlgoGlanceRows. Plain fields (not
+// embedding+methods like the old algoCountRowView) since
+// AvgDifficultyDisplay/CurrentDifficultyDisplay are computed once at merge time, where
+// the graceful zero-value defaults are simplest to apply.
 type algoGlanceRow struct {
 	Algo                     string
 	Count                    int64
@@ -252,21 +252,23 @@ type algoGlanceRow struct {
 }
 
 // newAlgoGlanceRows merges algos (db.RecentBlocksStats.Algos, the last-N-blocks
-// pool/algo-breakdown sample) and snapshots (db.LatestDifficultySnapshots, the live
-// per-algo current-difficulty target) into a fixed-shape []algoGlanceRow: always
-// exactly len(analysis.AlgoOrder) rows, one per algo, in analysis.AlgoOrder's order
-// (RXM, RXT, C29, SHA3X) regardless of what order/subset either input arrived in. An
-// algo missing from algos gets Count=0/AvgDifficultyDisplay="0.00"; an algo missing
-// from snapshots gets CurrentDifficultyDisplay="0" - callers pass nil for either slice
-// (e.g. on a DB-query failure) to degrade every row to that algo's default rather than
-// omitting the row or erroring. Pure/pass-by-value - no DB access - so it's easily
-// unit-tested without a live database.
-func newAlgoGlanceRows(algos []db.AlgoCountRow, snapshots []db.DifficultySnapshot) []algoGlanceRow {
+// pool/algo-breakdown sample) and snapshots (db.LatestTemplateDifficultySnapshots, the
+// live per-algo NEXT-block target difficulty, read straight off the base-node daemon's
+// block template rather than any already-mined block - see
+// db.TemplateDifficultySnapshot's doc comment) into a fixed-shape []algoGlanceRow:
+// always exactly len(analysis.AlgoOrder) rows, one per algo, in analysis.AlgoOrder's
+// order (RXM, RXT, C29, SHA3X) regardless of what order/subset either input arrived
+// in. An algo missing from algos gets Count=0/AvgDifficultyDisplay="0.00"; an algo
+// missing from snapshots gets CurrentDifficultyDisplay="0" - callers pass nil for
+// either slice (e.g. on a DB-query failure) to degrade every row to that algo's
+// default rather than omitting the row or erroring. Pure/pass-by-value - no DB access -
+// so it's easily unit-tested without a live database.
+func newAlgoGlanceRows(algos []db.AlgoCountRow, snapshots []db.TemplateDifficultySnapshot) []algoGlanceRow {
 	countByAlgo := make(map[string]db.AlgoCountRow, len(algos))
 	for _, a := range algos {
 		countByAlgo[a.Algo] = a
 	}
-	diffByAlgo := make(map[string]db.DifficultySnapshot, len(snapshots))
+	diffByAlgo := make(map[string]db.TemplateDifficultySnapshot, len(snapshots))
 	for _, s := range snapshots {
 		diffByAlgo[s.Algo] = s
 	}
@@ -283,7 +285,7 @@ func newAlgoGlanceRows(algos []db.AlgoCountRow, snapshots []db.DifficultySnapsho
 			row.AvgDifficultyDisplay = humanizeFloat(a.AvgDifficulty, 2)
 		}
 		if s, ok := diffByAlgo[algo]; ok {
-			row.CurrentDifficultyDisplay = humanizeInt(s.Difficulty)
+			row.CurrentDifficultyDisplay = humanizeInt(s.TargetDifficulty)
 		}
 		row.CountDisplay = humanizeInt(row.Count)
 		out = append(out, row)
@@ -294,17 +296,18 @@ func newAlgoGlanceRows(algos []db.AlgoCountRow, snapshots []db.DifficultySnapsho
 // handleBlocksList serves the front page: the paginated blocks table (unchanged from
 // before this feature) plus two "at a glance" panels - a last-100-blocks pool/algo
 // breakdown (db.RecentBlocksStats, task 5a) whose Algo table also carries a live
-// per-algo "current block diff" column (db.LatestDifficultySnapshots, populated by the
-// separate cmd/difficulty-poller process/internal/difficultypoller.Poller - NOT a
-// query run inline on every page render - showing the live difficulty target for the
-// algo's single most-recently-observed block, distinct from (and not lagged/smoothed
-// like) RecentBlocksStats' AvgDifficulty, merged in via newAlgoGlanceRows), and a live
-// mempool-stats summary (task 5b, the same GetMempoolStats numbers /mempool shows,
-// condensed). Both panels degrade to an inline error message (or, for the
-// current-difficulty column specifically, a silent per-algo "0" default - see
-// newAlgoGlanceRows) rather than failing the whole page: a query error or an
-// unconfigured/failing s.Node is not reason enough to 500 a page whose main content
-// (the blocks table) loaded fine.
+// per-algo "current block diff" column (db.LatestTemplateDifficultySnapshots,
+// populated by the separate cmd/template-difficulty-poller
+// process/internal/templatepoller.Poller - NOT a query run inline on every page
+// render - showing the forward-looking NEXT-block target difficulty for the algo's
+// most-recently-observed block template, straight off the live base-node daemon,
+// distinct from (and not lagged/smoothed like) RecentBlocksStats' AvgDifficulty,
+// merged in via newAlgoGlanceRows), and a live mempool-stats summary (task 5b, the
+// same GetMempoolStats numbers /mempool shows, condensed). Both panels degrade to an
+// inline error message (or, for the current-difficulty column specifically, a silent
+// per-algo "0" default - see newAlgoGlanceRows) rather than failing the whole page: a
+// query error or an unconfigured/failing s.Node is not reason enough to 500 a page
+// whose main content (the blocks table) loaded fine.
 func (s *Server) handleBlocksList(w http.ResponseWriter, r *http.Request) {
 	blocks, err := s.DB.ListBlocks(r.Context(), math.MaxInt64, PageSize)
 	if err != nil {
@@ -330,9 +333,9 @@ func (s *Server) handleBlocksList(w http.ResponseWriter, r *http.Request) {
 		data.RecentStats = recentBlocksStatsView{recentStats}
 	}
 
-	currentDiff, err := s.DB.LatestDifficultySnapshots(r.Context())
+	currentDiff, err := s.DB.LatestTemplateDifficultySnapshots(r.Context())
 	if err != nil {
-		log.Printf("server: latest difficulty snapshots: %v", err)
+		log.Printf("server: latest template difficulty snapshots: %v", err)
 		currentDiff = nil
 	}
 	data.AlgoGlance = newAlgoGlanceRows(recentStats.Algos, currentDiff)

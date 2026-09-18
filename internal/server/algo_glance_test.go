@@ -31,8 +31,8 @@ func TestNewAlgoGlanceRows_AlgoPresentInBothInputs_UsesRealValues(t *testing.T) 
 	algos := []db.AlgoCountRow{
 		{Algo: "RXM", Count: 42, AvgDifficulty: 1234.5},
 	}
-	snapshots := []db.DifficultySnapshot{
-		{Algo: "RXM", Difficulty: 9876, Height: 100},
+	snapshots := []db.TemplateDifficultySnapshot{
+		{Algo: "RXM", TargetDifficulty: 9876, Height: 100},
 	}
 
 	got := newAlgoGlanceRows(algos, snapshots)
@@ -55,8 +55,8 @@ func TestNewAlgoGlanceRows_AlgoPresentInNeitherInput_DefaultsGracefully(t *testi
 	algos := []db.AlgoCountRow{
 		{Algo: "RXM", Count: 1, AvgDifficulty: 1},
 	}
-	snapshots := []db.DifficultySnapshot{
-		{Algo: "RXM", Difficulty: 1},
+	snapshots := []db.TemplateDifficultySnapshot{
+		{Algo: "RXM", TargetDifficulty: 1},
 	}
 
 	got := newAlgoGlanceRows(algos, snapshots)
@@ -105,8 +105,8 @@ func TestNewAlgoGlanceRows_AlgoPresentOnlyInAlgos_CountAndAvgFromAlgosCurrentDif
 }
 
 func TestNewAlgoGlanceRows_AlgoPresentOnlyInSnapshots_CurrentDiffFromSnapshotsCountAndAvgDefault(t *testing.T) {
-	snapshots := []db.DifficultySnapshot{
-		{Algo: "SHA3X", Difficulty: 4242, Height: 500},
+	snapshots := []db.TemplateDifficultySnapshot{
+		{Algo: "SHA3X", TargetDifficulty: 4242, Height: 500},
 	}
 
 	got := newAlgoGlanceRows(nil, snapshots)
@@ -137,11 +137,11 @@ func TestNewAlgoGlanceRows_InputOrderDoesNotAffectOutputOrder(t *testing.T) {
 		{Algo: "C29", Count: 3, AvgDifficulty: 3},
 		{Algo: "RXT", Count: 2, AvgDifficulty: 2},
 	}
-	snapshots := []db.DifficultySnapshot{
-		{Algo: "C29", Difficulty: 30},
-		{Algo: "SHA3X", Difficulty: 40},
-		{Algo: "RXT", Difficulty: 20},
-		{Algo: "RXM", Difficulty: 10},
+	snapshots := []db.TemplateDifficultySnapshot{
+		{Algo: "C29", TargetDifficulty: 30},
+		{Algo: "SHA3X", TargetDifficulty: 40},
+		{Algo: "RXT", TargetDifficulty: 20},
+		{Algo: "RXM", TargetDifficulty: 10},
 	}
 
 	got := newAlgoGlanceRows(algos, snapshots)
