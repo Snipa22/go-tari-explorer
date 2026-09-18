@@ -198,3 +198,19 @@ func DifficultyPollInterval() time.Duration {
 	}
 	return DefaultDifficultyPollInterval
 }
+
+// DefaultTemplateDifficultyPollInterval is how often cmd/template-difficulty-poller
+// polls the live base-node daemon's block-template RPC, absent an env override.
+const DefaultTemplateDifficultyPollInterval = 1 * time.Second
+
+// TemplateDifficultyPollInterval returns TARI_EXPLORER_TEMPLATE_DIFFICULTY_POLL_INTERVAL
+// parsed as a time.Duration if set to a valid duration string, else
+// DefaultTemplateDifficultyPollInterval.
+func TemplateDifficultyPollInterval() time.Duration {
+	if v := os.Getenv("TARI_EXPLORER_TEMPLATE_DIFFICULTY_POLL_INTERVAL"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil {
+			return d
+		}
+	}
+	return DefaultTemplateDifficultyPollInterval
+}
