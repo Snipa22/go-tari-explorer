@@ -27,6 +27,7 @@ Two tables (see `internal/db/migrations/0001_init.up.sql`):
 
 - `blocks` — `height` (PK), `hash`, `prev_hash`, `timestamp`, `pow_algo`, `difficulty`, `kernel_count`, `output_count`, `pool_tag` (nullable).
 - `block_kernels` — a per-block kernel-count/fee summary row, keyed on `block_height`. Not yet a full per-kernel table — extend incrementally as real transaction-detail pages are needed.
+- `template_difficulty_snapshots` (see `internal/db/migrations/0009_template_difficulty_snapshots.up.sql`) — one row per `(algo, height)` pair actually observed by `cmd/template-difficulty-poller` polling the base node's LIVE block-template RPC (`GetNewBlockTemplate`) once a second: `algo`, `height` (the NEXT block that algo's template targets, not yet mined), `target_difficulty`, `reward`, `recorded_at`. This is the forward-looking counterpart to the retrospective per-algo difficulty already implied by `blocks.difficulty` — it captures the target a miner faces *right now* for an unmined block, straight from the live daemon, rather than a value derived from already-indexed blocks.
 
 ## Migrations
 

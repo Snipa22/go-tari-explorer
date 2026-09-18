@@ -1539,6 +1539,73 @@ func (d *DB) LatestDifficultySnapshots(ctx context.Context) ([]DifficultySnapsho
 	return out, rows.Err()
 }
 
+// TemplateDifficultySnapshot is the row shape for the `template_difficulty_snapshots`
+// table: one row per (Algo, Height) pair actually observed by
+// cmd/template-difficulty-poller (internal/templatepoller.Poller), which polls the
+// LIVE base-node daemon's block-template RPC (GetNewBlockTemplate, via
+// internal/nodeclient - not this repo's already-indexed `blocks` table) on a short
+// interval and upserts a new row per (algo, height) it observes. This is the
+// forward-looking counterpart to DifficultySnapshot above: DifficultySnapshot's
+// Height/Difficulty describe a block that was ALREADY MINED (read from `blocks`);
+// TemplateDifficultySnapshot's Height/TargetDifficulty describe the NEXT block an algo
+// hasn't mined yet (read straight off the live daemon). See
+// migrations/0009_template_difficulty_snapshots.up.sql for the full rationale.
+type TemplateDifficultySnapshot struct {
+	ID               int64
+	Algo             string
+	Height           int64
+	TargetDifficulty int64
+	Reward           int64
+	RecordedAt       time.Time
+}
+
+// UpsertTemplateDifficultySnapshot inserts a new template_difficulty_snapshots row for
+// s.Algo/s.Height, or does nothing if a row for that exact (algo, height) pair already
+// exists (ON CONFLICT (algo, height) DO NOTHING - see the UNIQUE constraint in
+// migrations/0009_template_difficulty_snapshots.up.sql). Returns inserted=true only
+// when a new row was actually added, so callers (the poller's Tick, and its tests) can
+// distinguish "this is a new template height for this algo" from "no change since last
+// tick" without a separate existence-check query, mirroring
+// UpsertDifficultySnapshot's exact behavior.
+func (d *DB) UpsertTemplateDifficultySnapshot(ctx context.Context, s TemplateDifficultySnapshot) (inserted bool, err error) {
+	tag, err := d.Pool.Exec(ctx, `
+		INSERT INTO template_difficulty_snapshots (algo, height, target_difficulty, reward, recorded_at)
+		VALUES ($1, $2, $3, $4, $5)
+		ON CONFLICT (algo, height) DO NOTHING
+	`, s.Algo, s.Height, s.TargetDifficulty, s.Reward, s.RecordedAt)
+	if err != nil {
+		return false, fmt.Errorf("db: upsert template difficulty snapshot: %w", err)
+	}
+	return tag.RowsAffected() > 0, nil
+}
+
+// LatestTemplateDifficultySnapshots returns, for each algo present in
+// template_difficulty_snapshots, the row with the highest height (DISTINCT ON (algo) +
+// ORDER BY algo, height DESC) - the live "current template difficulty per algo" view
+// reads this rather than hitting the base-node daemon directly on every render,
+// mirroring LatestDifficultySnapshots' exact query shape.
+func (d *DB) LatestTemplateDifficultySnapshots(ctx context.Context) ([]TemplateDifficultySnapshot, error) {
+	rows, err := d.Pool.Query(ctx, `
+		SELECT DISTINCT ON (algo) id, algo, height, target_difficulty, reward, recorded_at
+		FROM template_difficulty_snapshots
+		ORDER BY algo, height DESC
+	`)
+	if err != nil {
+		return nil, fmt.Errorf("db: latest template difficulty snapshots: %w", err)
+	}
+	defer rows.Close()
+
+	var out []TemplateDifficultySnapshot
+	for rows.Next() {
+		var s TemplateDifficultySnapshot
+		if err := rows.Scan(&s.ID, &s.Algo, &s.Height, &s.TargetDifficulty, &s.Reward, &s.RecordedAt); err != nil {
+			return nil, fmt.Errorf("db: latest template difficulty snapshots: scan: %w", err)
+		}
+		out = append(out, s)
+	}
+	return out, rows.Err()
+}
+
 // RecentBlocksStats computes the front-page pool/algo breakdown over the most recently
 // indexed `limit` blocks (ORDER BY height DESC LIMIT limit), in a single round trip to
 // Postgres: one CTE selects the candidate blocks (with pool_tag folded through

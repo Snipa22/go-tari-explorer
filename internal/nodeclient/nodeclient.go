@@ -311,6 +311,31 @@ func (c *Client) GetMempoolTransactions(ctx context.Context) ([]*tari_generated.
 	})
 }
 
+// GetNewBlockTemplate returns the base node's current block template for algo - the
+// forward-looking NEXT block that algo would need to mine, including the target
+// difficulty and reward a miner on that algo faces right now - with failover across
+// configured hosts. This is deliberately a live GRPC call, not answered from this
+// repo's Postgres index: unlike internal/difficultypoller (which reads the difficulty
+// already stamped on the most recently INDEXED block for an algo, i.e. a block that
+// already exists), the template difficulty is the target for a block that hasn't been
+// mined yet, and only the live daemon knows it.
+//
+// MaxWeight is passed as 0: the proto comment on NewBlockTemplateRequest.max_weight
+// ("This field should be moved to optional once optional keyword is standard") implies
+// 0 is the zero-value/unset sentinel rather than a real "zero-weight" cap, and no
+// existing caller in this codebase (or in go-tari-grpc-lib's own cmd/blockWinners) sets
+// a non-zero max_weight - this repo only reads target_difficulty/reward/height off the
+// response, it never actually mines/submits the returned block body, so a template's
+// weight limit doesn't matter for our purposes either way.
+func (c *Client) GetNewBlockTemplate(ctx context.Context, algo tari_generated.PowAlgo_PowAlgos) (*tari_generated.NewBlockTemplateResponse, error) {
+	return withFailover(c, ctx, func(ctx context.Context, client tari_generated.BaseNodeClient) (*tari_generated.NewBlockTemplateResponse, error) {
+		return client.GetNewBlockTemplate(ctx, &tari_generated.NewBlockTemplateRequest{
+			Algo:      &tari_generated.PowAlgo{PowAlgo: algo},
+			MaxWeight: 0,
+		})
+	})
+}
+
 // GetMempoolStats returns the base node's current aggregate mempool statistics -
 // unconfirmed transaction count, reorg transaction count, and total unconfirmed
 // weight - with failover across configured hosts. Unlike GetMempoolTransactions above,
