@@ -897,3 +897,50 @@ func TestHandleAPIDocs(t *testing.T) {
 		t.Errorf("body missing reference to /api/spec as the Swagger UI spec URL, got: %s", body)
 	}
 }
+
+// TestHandleAPIDocs_DarkThemeOverrides is a cheap regression guard (not a substitute
+// for the real browser-rendered visual verification this fix was checked with) against
+// someone reverting/trimming the <style> block's dark-theme contrast overrides for
+// Swagger UI v5's default light theme. Each substring below is a real selector copied
+// verbatim from https://unpkg.com/swagger-ui-dist@5/swagger-ui.css (matching its exact
+// specificity so the cascade favors this page's later <style> block without
+// `!important`) - see templates/api_docs.html's own comments for the rationale per
+// selector.
+func TestHandleAPIDocs_DarkThemeOverrides(t *testing.T) {
+	s, err := New(nil, nil, "", nil, nil)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	req := httptest.NewRequest("GET", "/api/docs", nil)
+	rec := httptest.NewRecorder()
+	s.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != 200 {
+		t.Fatalf("status = %d, want 200, body: %s", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.String()
+	for _, want := range []string{
+		// Main info-paragraph body text (title/headings/body/base-url/links).
+		".swagger-ui .info p,",
+		".swagger-ui .info .title { color: #e6e6e6; }",
+		".swagger-ui .info .base-url { color: #999; }",
+		// Operation summary + expanded description text.
+		".swagger-ui .opblock .opblock-summary-description { color: #999; }",
+		".swagger-ui .opblock-description-wrapper p,",
+		// Parameters/Responses tab bar - the same "stark white bar" issue as Servers.
+		".swagger-ui .opblock .opblock-section-header { background: #17171b; }",
+		".swagger-ui .parameter__name { color: #e6e6e6; }",
+		// Schemas/Models section: model text + the newer json-schema-2020-12 viewer.
+		".swagger-ui .model { color: #e6e6e6; }",
+		".swagger-ui .model-title { color: #e6e6e6; }",
+		".swagger-ui .json-schema-2020-12-property .json-schema-2020-12__title { color: #e6e6e6; }",
+		// The "Servers" dropdown bar's white background, and native <select> chrome.
+		".swagger-ui .scheme-container { background: #17171b; }",
+		".swagger-ui select {",
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("body missing expected dark-theme override %q", want)
+		}
+	}
+}

@@ -21,12 +21,15 @@ info:
     name: go-tari-explorer
     url: https://github.com/Snipa22/go-tari-explorer
 servers:
-  # No production deployment URL for this repo is documented anywhere in its own
-  # README.md/AGENTS.md/CONTRIBUTING.md, nor discoverable from any Dockerfile/systemd
-  # unit/CI deploy step (checked before writing this - this repo has none of those).
-  # Only the local-dev default listen address (`cmd/server`'s `-http-addr` default,
-  # see README.md's Configuration table) is known from source. Add a real `url:` entry
-  # here once a production deployment exists/is documented.
+  # This repo's cmd/server binary is deployed twice from the same build (see the
+  # tari-explorer-server / tari-explorer-testnet-server systemd units on the ops
+  # side): mainnet is this repo's primary/canonical instance and is listed first,
+  # testnet/Esmeralda second. Local dev (cmd/server's -http-addr default, see
+  # README.md's Configuration table) is kept last.
+  - url: https://explorer.supportxtm.com
+    description: Public mainnet deployment
+  - url: https://testnet.supportxtm.com
+    description: Public testnet (Esmeralda) deployment
   - url: http://localhost:8080
     description: Local development (cmd/server default listen address, -http-addr)
 

@@ -8,6 +8,90 @@
         body { margin: 0; background: #0f0f12; }
         .topbar-link { color: #e6e6e6; font-family: monospace; padding: 0.6rem 1rem; display: block; background: #17171b; border-bottom: 1px solid #333; }
         .topbar-link a { color: #7cc7ff; }
+
+        /* Dark-theme contrast overrides for Swagger UI v5's default light theme
+           (swagger-ui.css). Selectors below are copied verbatim from the real
+           shipped https://unpkg.com/swagger-ui-dist@5/swagger-ui.css so they match
+           (or exceed) that stylesheet's specificity - since this <style> block is
+           later in the document than the <link>'d stylesheet, equal-specificity
+           rules here win the cascade without needing !important. Colors reuse this
+           repo's own palette (see templates/layout.html): background #0f0f12,
+           panel background #17171b, borders #333, primary text #e6e6e6, muted text
+           #999, links #7cc7ff. */
+
+        /* Main info-paragraph body text (title/headings/body/base-url), currently
+           Swagger UI's default dark-grey-on-white #3b4151. */
+        .swagger-ui .info h1,
+        .swagger-ui .info h2,
+        .swagger-ui .info h3,
+        .swagger-ui .info h4,
+        .swagger-ui .info h5,
+        .swagger-ui .info li,
+        .swagger-ui .info p,
+        .swagger-ui .info table { color: #e6e6e6; }
+        .swagger-ui .info .title { color: #e6e6e6; }
+        .swagger-ui .info .base-url { color: #999; }
+        .swagger-ui .info a { color: #7cc7ff; }
+
+        /* Operation summary description text (next to each route's method/path) -
+           default #3b4151 on the near-black body background. */
+        .swagger-ui .opblock .opblock-summary-description { color: #999; }
+
+        /* Operation detail body: the full (non-summary) description paragraph
+           shown once an operation is expanded, and the Parameters/Responses tab
+           bar - which defaults to hsla(0,0%,100%,.8) (a near-white bar) clashing
+           the same way the Servers bar does, with dark #3b4151 tab-label text
+           that would otherwise vanish once that bar is darkened. */
+        .swagger-ui .opblock-description-wrapper p,
+        .swagger-ui .opblock-external-docs-wrapper p,
+        .swagger-ui .opblock-title_normal p { color: #999; }
+        .swagger-ui .opblock .opblock-section-header { background: #17171b; }
+        .swagger-ui .opblock .opblock-section-header h4 { color: #e6e6e6; }
+        .swagger-ui .opblock .opblock-section-header .try-out__btn { color: #e6e6e6; border-color: #444; }
+        .swagger-ui .parameter__name { color: #e6e6e6; }
+        .swagger-ui .parameter__type { color: #999; }
+        .swagger-ui .response-col_status { color: #e6e6e6; }
+
+        /* Schemas/Models section: model name text and other dark-on-dark labels
+           default to #505050/#55a/#606060 against the dark body background. Model
+           property-name <td>s carry no color of their own - they inherit #3b4151
+           from the enclosing .model, which is the actual fix that matters here. */
+        .swagger-ui .model { color: #e6e6e6; }
+        .swagger-ui .model-title { color: #e6e6e6; }
+        .swagger-ui .prop-type { color: #7cc7ff; }
+        .swagger-ui .prop-format { color: #999; }
+        .swagger-ui table.model tr.description { color: #999; }
+        .swagger-ui table thead tr td,
+        .swagger-ui table thead tr th { color: #e6e6e6; border-bottom-color: #333; }
+
+        /* Schemas section (continued): swagger-ui-dist@5 renders each model's
+           properties via a newer "json-schema-2020-12" viewer (not the old
+           <table class="model"> layout above), whose property/type/description
+           text also defaults to #3b4151/#6b6b6b - equally unreadable here. */
+        .swagger-ui .json-schema-2020-12__title { color: #e6e6e6; }
+        .swagger-ui .json-schema-2020-12-property .json-schema-2020-12__title { color: #e6e6e6; }
+        .swagger-ui .json-schema-2020-12-keyword__name--primary { color: #e6e6e6; }
+        .swagger-ui .json-schema-2020-12-keyword__name--secondary,
+        .swagger-ui .json-schema-2020-12-keyword__name--extension { color: #999; }
+        .swagger-ui .json-schema-2020-12-keyword__value { color: #999; }
+        .swagger-ui .json-schema-2020-12-keyword__value--primary { color: #7cc7ff; }
+        .swagger-ui .json-schema-2020-12-keyword__value--secondary,
+        .swagger-ui .json-schema-2020-12-keyword__value--extension { color: #999; }
+        .swagger-ui .json-schema-2020-12-keyword--description { color: #999; }
+        .swagger-ui .json-schema-2020-12__attribute { color: #999; }
+        .swagger-ui .json-schema-2020-12__attribute--primary { color: #7cc7ff; }
+
+        /* The "Servers" dropdown bar - default background is a stark #fff, and its
+           native <select> control ships its own #f7f7f7 background/dark-arrow-icon
+           combination that isn't covered by the .scheme-container background alone. */
+        .swagger-ui .scheme-container { background: #17171b; }
+        .swagger-ui .scheme-container .schemes > .schemes-server-container > label { color: #e6e6e6; }
+        .swagger-ui select {
+            background-color: #17171b;
+            background-image: url("data:image/svg+xml;charset=utf-8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 20 20'><path fill='%23999' d='M13.418 7.859a.695.695 0 0 1 .978 0 .68.68 0 0 1 0 .969l-3.908 3.83a.697.697 0 0 1-.979 0l-3.908-3.83a.68.68 0 0 1 0-.969.695.695 0 0 1 .978 0L10 11z'/></svg>");
+            border-color: #333;
+            color: #e6e6e6;
+        }
     </style>
 </head>
 <body>
