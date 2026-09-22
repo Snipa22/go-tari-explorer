@@ -1,0 +1,28 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>go-tari-explorer API docs</title>
+    <link rel="stylesheet" href="https://unpkg.com/swagger-ui-dist@5/swagger-ui.css">
+    <style>
+        body { margin: 0; background: #0f0f12; }
+        .topbar-link { color: #e6e6e6; font-family: monospace; padding: 0.6rem 1rem; display: block; background: #17171b; border-bottom: 1px solid #333; }
+        .topbar-link a { color: #7cc7ff; }
+    </style>
+</head>
+<body>
+<div class="topbar-link"><a href="/">&laquo; go-tari-explorer</a></div>
+<div id="swagger-ui"></div>
+<script src="https://unpkg.com/swagger-ui-dist@5/swagger-ui-bundle.js"></script>
+<script>
+    window.onload = function () {
+        window.ui = SwaggerUIBundle({
+            url: "/api/spec?format=json",
+            dom_id: "#swagger-ui",
+            presets: [SwaggerUIBundle.presets.apis],
+            layout: "BaseLayout",
+        });
+    };
+</script>
+</body>
+</html>

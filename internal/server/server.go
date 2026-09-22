@@ -76,6 +76,11 @@ type Server struct {
 	txStateTmpl        *template.Template
 	mempoolTmpl        *template.Template
 	mempoolHistoryTmpl *template.Template
+	// apiDocsTmpl is a standalone page (Swagger UI's own layout would clash with
+	// layout.html's HTMX-driven blocks-list page, so this is parsed on its own,
+	// not layered on top of layout.html like every other *Tmpl field above) - see
+	// templates/api_docs.html's own doc comment and handleAPIDocs in api.go.
+	apiDocsTmpl *template.Template
 	// searchRateLimiter is applied (via rateLimitMiddleware, see ratelimit.go) to
 	// every route that triggers a live GRPC call out to the operator's own base node
 	// per request: /search, /tx-state, /mempool, /mempool/history, and / (the front
@@ -133,6 +138,10 @@ func New(database *db.DB, poolStatsProvider poolstats.PoolStatsProvider, poolSta
 	if err != nil {
 		return nil, fmt.Errorf("server: parse mempool history template: %w", err)
 	}
+	apiDocsTmpl, err := template.New("api_docs.html").Funcs(funcs).ParseFS(templateFS, "templates/api_docs.html")
+	if err != nil {
+		return nil, fmt.Errorf("server: parse api docs template: %w", err)
+	}
 	return &Server{
 		DB:                 database,
 		PoolStats:          poolStatsProvider,
@@ -149,6 +158,7 @@ func New(database *db.DB, poolStatsProvider poolstats.PoolStatsProvider, poolSta
 		txStateTmpl:        txStateTmpl,
 		mempoolTmpl:        mempoolTmpl,
 		mempoolHistoryTmpl: mempoolHistoryTmpl,
+		apiDocsTmpl:        apiDocsTmpl,
 		// One rate limiter shared by /search, /tx-state, /mempool, /mempool/history,
 		// and / - all of them trigger the same kind of live GRPC call out to the
 		// base node (or, for /, a Postgres query plus that same live call for its
@@ -222,6 +232,13 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/analysis/rewards-by-pool", s.handleAPIAnalysisRewardsByPool)
 	mux.HandleFunc("GET /api/tip-info", s.searchRateLimiter.rateLimitMiddleware(s.handleAPITipInfo))
 	mux.HandleFunc("GET /api/health", s.handleAPIHealth)
+
+	// OpenAPI 3.0 spec + served Swagger UI - per DISPATCH_BRIEF_OPENAPI.md. /api/spec
+	// is Postgres-only-independent (it just serves the embedded docs.OpenAPISpecYAML,
+	// see api.go's handleAPISpec), so it's left unwrapped like every other read-only
+	// /api/* route above; /api/docs serves a minimal Swagger UI page pointed at it.
+	mux.HandleFunc("GET /api/spec", s.handleAPISpec)
+	mux.HandleFunc("GET /api/docs", s.handleAPIDocs)
 	return mux
 }
 

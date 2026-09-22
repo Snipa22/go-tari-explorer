@@ -1,0 +1,1144 @@
+openapi: 3.0.3
+info:
+  title: go-tari-explorer API
+  description: >-
+    Read-only JSON API over this (L1) Tari block explorer's Postgres-backed data:
+    indexed blocks (with per-kernel/per-output breakdown), pool-wide mining statistics,
+    height-bucketed historical analysis (algo distribution, pool share, per-pool algo
+    breakdown, block time, difficulty, rewards by algo/pool), a live chain-tip snapshot,
+    and a liveness probe. Every route in this namespace is served by
+    `internal/server/api.go`, mirrors one existing HTML route's Store/DB query and
+    pagination/filter semantics 1:1 (see that file's own doc comments), and is strictly
+    additive alongside (never a replacement for) this repo's existing server-rendered
+    HTML+HTMX UI.
+
+    This covers only the Phase 1 `/api/*` surface (blocks/pool-stats/analysis/tip-info/
+    health) that exists as of this spec's writing. A Phase 2 surface (search/tx-state/
+    mempool - the live-GRPC, rate-limited routes) is a separate, not-yet-written follow-up
+    and is intentionally not documented here.
+  version: "0.1.0"
+  contact:
+    name: go-tari-explorer
+    url: https://github.com/Snipa22/go-tari-explorer
+servers:
+  # No production deployment URL for this repo is documented anywhere in its own
+  # README.md/AGENTS.md/CONTRIBUTING.md, nor discoverable from any Dockerfile/systemd
+  # unit/CI deploy step (checked before writing this - this repo has none of those).
+  # Only the local-dev default listen address (`cmd/server`'s `-http-addr` default,
+  # see README.md's Configuration table) is known from source. Add a real `url:` entry
+  # here once a production deployment exists/is documented.
+  - url: http://localhost:8080
+    description: Local development (cmd/server default listen address, -http-addr)
+
+tags:
+  - name: blocks
+  - name: pool-stats
+  - name: analysis
+  - name: tip-info
+  - name: health
+
+paths:
+  /api/blocks:
+    get:
+      operationId: listBlocks
+      tags: [blocks]
+      summary: List recently indexed blocks
+      description: >-
+        Same before-cursor + limit pagination shape as the HTML `/` and `/blocks/partial`
+        routes (`s.DB.ListBlocks`), collapsed into one JSON endpoint (no separate
+        "full page vs HTMX rows-only partial" split). Rows are ordered by height DESC
+        (most recent first).
+      parameters:
+        - name: before
+          in: query
+          required: false
+          description: >-
+            Height cursor - returns rows with `height < before`. Defaults to the
+            maximum int64 value (i.e. the first/most-recent page) when omitted. A
+            value that fails to parse as an int64 is rejected with a 400.
+          schema:
+            type: integer
+            format: int64
+        - name: limit
+          in: query
+          required: false
+          description: >-
+            Maximum number of rows to return. Defaults to 25 (PageSize) when omitted.
+            Values above 100 (MaxAPILimit) are silently clamped down to 100; a value
+            that is not a positive integer is rejected with a 400.
+          schema:
+            type: integer
+            minimum: 1
+            default: 25
+            maximum: 100
+      responses:
+        "200":
+          description: >-
+            An array of blocks. An empty result is always marshaled as a JSON array
+            `[]`, never `null`.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Block"
+        "400":
+          description: Malformed `before` or `limit` query parameter.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "500":
+          description: Store/database failure.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+
+  /api/blocks/{height}:
+    get:
+      operationId: getBlockDetail
+      tags: [blocks]
+      summary: Get one block plus its per-kernel/per-output breakdown
+      description: >-
+        Mirrors the HTML `/blocks/{height}` route's three DB calls
+        (`s.DB.GetBlock`/`GetKernelsForBlock`/`GetOutputsForBlock`) exactly.
+      parameters:
+        - name: height
+          in: path
+          required: true
+          description: Block height. Must parse as a non-negative uint64.
+          schema:
+            type: integer
+            format: int64
+            minimum: 0
+      responses:
+        "200":
+          description: The block, its kernels, and its outputs.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiBlockDetail"
+        "400":
+          description: "`height` is not a valid non-negative integer."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "404":
+          description: No block exists at this height.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "500":
+          description: Store/database failure.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+
+  /api/pool-stats:
+    get:
+      operationId: getPoolStats
+      tags: [pool-stats]
+      summary: Pool-wide mining statistics
+      description: >-
+        Mirrors the HTML `/pool-stats` route's `s.PoolStats.GetStats(ctx)` call. Unlike
+        the HTML page (which degrades to an inline error message rather than a non-200
+        status), a JSON consumer gets an explicit 503 signal for either "pool stats
+        provider not configured" or "backend fetch failed" - both are indistinguishable
+        at this status-code level by design (see `handleAPIPoolStats`'s doc comment).
+      responses:
+        "200":
+          description: Current pool-wide statistics.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PoolStats"
+        "503":
+          description: >-
+            Pool stats provider not configured (`s.PoolStats` is nil), or the backend
+            fetch failed.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+
+  /api/analysis/algo-distribution:
+    get:
+      operationId: getAnalysisAlgoDistribution
+      tags: [analysis]
+      summary: Height-bucketed per-algo block-count distribution
+      description: >-
+        Mirrors the HTML `/analysis/algo-distribution` view's `s.DB.AlgoBucketCounts`
+        call, returning the raw bucket rows (not the chart-shaped
+        `[]chartrender.Point` that view's PNG uses).
+      parameters:
+        - $ref: "#/components/parameters/BucketSize"
+        - $ref: "#/components/parameters/From"
+        - $ref: "#/components/parameters/To"
+      responses:
+        "200":
+          description: >-
+            An array of per-bucket per-algo block counts. An empty result is always
+            marshaled as a JSON array `[]`, never `null`.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/AlgoBucketRow"
+        "500":
+          description: Store/database failure.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+
+  /api/analysis/pool-share:
+    get:
+      operationId: getAnalysisPoolShare
+      tags: [analysis]
+      summary: Height-bucketed pool market-share block counts
+      description: >-
+        Mirrors the HTML `/analysis/pool-share` view's `s.DB.PoolShareBucketCounts`
+        call, using the same `analysis.DefaultTopPools` (8) / `analysis
+        .DefaultPoolTagMappings` defaults for pool-tag folding and top-N ranking.
+      parameters:
+        - $ref: "#/components/parameters/BucketSize"
+        - $ref: "#/components/parameters/From"
+        - $ref: "#/components/parameters/To"
+      responses:
+        "200":
+          description: >-
+            An array of per-bucket per-pool block counts (long/tidy row shape - one
+            row per bucket+pool combination). An empty result is always marshaled as
+            a JSON array `[]`, never `null`.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/PoolShareBucketRow"
+        "500":
+          description: Store/database failure.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+
+  /api/analysis/pool-algo-breakdown:
+    get:
+      operationId: getAnalysisPoolAlgoBreakdown
+      tags: [analysis]
+      summary: Height-bucketed per-algo block counts, scoped to a single pool
+      description: >-
+        Mirrors the HTML `/analysis/pool-algo-breakdown` view's
+        `s.DB.AlgoBucketCountsForPool` call. `?pool=` follows the exact same
+        semantics as the HTML view (`parsePoolAlgoBreakdownPool`): defaults to the
+        first entry in `analysis.DefaultPoolTagMappings` (currently `"Jagtech"`) when
+        absent/blank. `pool` may be either a mapping's `CanonicalName` (e.g.
+        `"Jagtech"`, `"SupportXTM"`) or any literal unmapped `pool_tag` value (exact
+        match) - see `db.AlgoBucketCountsForPool`'s doc comment.
+      parameters:
+        - $ref: "#/components/parameters/BucketSize"
+        - $ref: "#/components/parameters/From"
+        - $ref: "#/components/parameters/To"
+        - name: pool
+          in: query
+          required: false
+          description: >-
+            Canonical pool name or literal unmapped pool_tag. Defaults to the first
+            entry in `analysis.DefaultPoolTagMappings` when absent/blank. If no pool
+            can be resolved (absent/blank AND no default mapping configured), this
+            route responds 400 rather than querying with an empty pool value.
+          schema:
+            type: string
+      responses:
+        "200":
+          description: >-
+            An array of per-bucket per-algo block counts for the resolved pool. An
+            empty result is always marshaled as a JSON array `[]`, never `null`.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/AlgoBucketRow"
+        "400":
+          description: No pool specified and no default pool tag mapping configured.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "500":
+          description: Store/database failure.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+
+  /api/analysis/block-time:
+    get:
+      operationId: getAnalysisBlockTime
+      tags: [analysis]
+      summary: Height-bucketed inter-block-time statistics
+      description: >-
+        Mirrors the HTML `/analysis/block-time` view's own explicit
+        `s.DB.BlockTimeDeltaBuckets` call (the same one that feeds that view's
+        per-bucket data table), not `analysis.BlockTime`'s chart-shaped
+        Points/summary return.
+      parameters:
+        - $ref: "#/components/parameters/BucketSize"
+        - $ref: "#/components/parameters/From"
+        - $ref: "#/components/parameters/To"
+      responses:
+        "200":
+          description: >-
+            An array of per-bucket block-time statistics. An empty result is always
+            marshaled as a JSON array `[]`, never `null`.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/BlockTimeBucketRow"
+        "500":
+          description: Store/database failure.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+
+  /api/analysis/difficulty:
+    get:
+      operationId: getAnalysisDifficulty
+      tags: [analysis]
+      summary: Height-bucketed average difficulty, per algo
+      description: >-
+        Mirrors the HTML `/analysis/difficulty` view's `s.DB.DifficultyBucketAvg` call.
+        Per-algo fields are `null` (never coerced to `0.0`) for a bucket/algo
+        combination with zero blocks - see `DifficultyBucketRow`'s schema description.
+      parameters:
+        - $ref: "#/components/parameters/BucketSize"
+        - $ref: "#/components/parameters/From"
+        - $ref: "#/components/parameters/To"
+      responses:
+        "200":
+          description: >-
+            An array of per-bucket per-algo average difficulty. An empty result is
+            always marshaled as a JSON array `[]`, never `null`.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/DifficultyBucketRow"
+        "500":
+          description: Store/database failure.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+
+  /api/analysis/rewards-by-algo:
+    get:
+      operationId: getAnalysisRewardsByAlgo
+      tags: [analysis]
+      summary: Height-bucketed summed coinbase reward, per algo
+      description: >-
+        Mirrors the HTML `/analysis/rewards-by-algo` view's
+        `s.DB.RewardBucketCountsByAlgo` call. Values are raw MicroMinotari sums - no
+        XTM conversion, unlike the HTML table's `newRewardsTableView`.
+      parameters:
+        - $ref: "#/components/parameters/BucketSize"
+        - $ref: "#/components/parameters/From"
+        - $ref: "#/components/parameters/To"
+      responses:
+        "200":
+          description: >-
+            An array of per-bucket per-algo summed rewards. An empty result is
+            always marshaled as a JSON array `[]`, never `null`.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/RewardBucketRow"
+        "500":
+          description: Store/database failure.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+
+  /api/analysis/rewards-by-pool:
+    get:
+      operationId: getAnalysisRewardsByPool
+      tags: [analysis]
+      summary: Height-bucketed summed coinbase reward, per pool
+      description: >-
+        Mirrors the HTML `/analysis/rewards-by-pool` view's
+        `s.DB.RewardBucketCountsByPool` call (same `analysis.DefaultTopPools`/
+        `analysis.DefaultPoolTagMappings` defaults as `/api/analysis/pool-share`).
+        Values are raw MicroMinotari sums - no XTM conversion.
+      parameters:
+        - $ref: "#/components/parameters/BucketSize"
+        - $ref: "#/components/parameters/From"
+        - $ref: "#/components/parameters/To"
+      responses:
+        "200":
+          description: >-
+            An array of per-bucket per-pool summed rewards (long/tidy row shape). An
+            empty result is always marshaled as a JSON array `[]`, never `null`.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/RewardPoolBucketRow"
+        "500":
+          description: Store/database failure.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+
+  /api/tip-info:
+    get:
+      operationId: getTipInfo
+      tags: [tip-info]
+      summary: Live base-node chain-tip snapshot
+      description: >-
+        A real, live `s.Node.GetTipInfo(ctx)` GRPC call against the configured
+        base-node host(s) - unlike every other route in this namespace, this is not
+        Postgres-backed. `best_block_hash`/`accumulated_difficulty` are hex-encoded
+        (matching this repo's own hash-rendering convention elsewhere, e.g.
+        `db.Block.Hash`/`PrevHash`), and `base_node_state` is the human enum name
+        (e.g. `"LISTENING"`), not its raw wire int32.
+      responses:
+        "200":
+          description: Current chain-tip snapshot.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiTipInfo"
+        "503":
+          description: >-
+            No base-node GRPC host configured (`s.Node` is nil), or the live GetTipInfo
+            call failed (e.g. every configured host unreachable).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+
+  /api/health:
+    get:
+      operationId: getHealth
+      tags: [health]
+      summary: Liveness probe for the HTTP process itself
+      description: >-
+        A cheap "is this HTTP process up and is its Postgres connection queryable"
+        check (`s.DB.MaxIndexedHeight(ctx)` succeeding is the "database reachable"
+        signal) - deliberately NOT a base-node/pool-stats reachability probe (those
+        are optional dependencies whose absence isn't this process being unhealthy).
+        Always returns HTTP 200 - a degraded database connection is reported in the
+        body (`"database": "degraded"` plus an `"error"` detail), never via a
+        non-200 status.
+      responses:
+        "200":
+          description: Always returned - see the `database` field for actual status.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiHealth"
+
+  /api/spec:
+    get:
+      operationId: getOpenApiSpec
+      tags: [health]
+      summary: Serve this OpenAPI spec
+      description: >-
+        Serves the contents of `docs/openapi.yaml` (embedded into the binary via
+        `//go:embed`) directly. Pass `?format=json` to receive the same spec
+        transcoded to JSON instead of YAML.
+      parameters:
+        - name: format
+          in: query
+          required: false
+          description: When set to `json`, transcodes the embedded YAML spec to JSON.
+          schema:
+            type: string
+            enum: [json]
+      responses:
+        "200":
+          description: The raw OpenAPI spec, as YAML (default) or JSON (`?format=json`).
+          content:
+            application/yaml:
+              schema:
+                type: string
+            application/json:
+              schema:
+                type: object
+
+  /api/docs:
+    get:
+      operationId: getSwaggerUi
+      tags: [health]
+      summary: Swagger UI page for this spec
+      description: >-
+        A minimal static HTML page embedding Swagger UI via a CDN script tag (same
+        CDN-not-a-build-step convention this repo already uses for HTMX in
+        `templates/layout.html`), pointed at `/api/spec` as its spec URL.
+      responses:
+        "200":
+          description: The Swagger UI HTML page.
+          content:
+            text/html:
+              schema:
+                type: string
+
+components:
+  parameters:
+    BucketSize:
+      name: bucket_size
+      in: query
+      required: false
+      description: >-
+        Height-bucket width. Defaults to `analysis.DefaultBucketSize` (1000) when
+        absent. Unlike `/api/blocks`'s `before`/`limit`, a malformed or zero value
+        here is NOT a 400 - it is silently treated as absent and falls back to the
+        default (`s.parseAnalysisParams`'s "read-only reporting page, not a
+        form that mutates state" rationale).
+      schema:
+        type: integer
+        format: int64
+        minimum: 1
+        default: 1000
+    From:
+      name: from
+      in: query
+      required: false
+      description: >-
+        Inclusive lower height bound. Defaults to
+        `max(0, highest-indexed-height - 10000)` when absent (the last ~10,000
+        indexed blocks), or `0` if the table is empty/errored. A malformed value is
+        silently treated as absent, same as `bucket_size` above.
+      schema:
+        type: integer
+        format: int64
+        minimum: 0
+    To:
+      name: to
+      in: query
+      required: false
+      description: >-
+        Inclusive upper height bound. Defaults to the highest currently-indexed
+        block height when absent, or `1000000` if the table is empty/errored. A
+        malformed value (or literal `0`) is silently treated as absent, same as
+        `bucket_size` above.
+      schema:
+        type: integer
+        format: int64
+        minimum: 0
+
+  schemas:
+    ApiError:
+      type: object
+      description: >-
+        Shared error-response shape for every /api/* route's 400/404/500/503
+        responses - this repo returns valid JSON even on error, never a plain-text
+        body (unlike the HTML routes' `http.Error`).
+      required: [error]
+      properties:
+        error:
+          type: string
+          example: failed to load blocks
+
+    Block:
+      type: object
+      description: >-
+        Mirrors `db.Block` exactly (marshaled directly, not through the HTML-only
+        `blockView` adapter) - a full decomposition of the real Tari protobuf
+        BlockHeader message plus its nested ProofOfWork message (flattened with a
+        `pow_` prefix), plus block-level summary fields derived from the block body.
+        `hash`/`prev_hash` are hex-encoded strings; every other `[]byte` field below
+        marshals via `encoding/json`'s default `[]byte` behavior (a base64 string) -
+        these are secondary merkle-root/offset/proof-of-work fields, not primary
+        searchable identifiers, so they are NOT hex-encoded (unlike `/api/tip-info`'s
+        DTO, which hex-encodes its two primary hash fields by contrast).
+      required:
+        - height
+        - hash
+        - version
+        - prev_hash
+        - timestamp
+        - output_mr
+        - block_output_mr
+        - kernel_mr
+        - input_mr
+        - total_kernel_offset
+        - nonce
+        - kernel_mmr_size
+        - output_mmr_size
+        - total_script_offset
+        - validator_node_mr
+        - validator_node_size
+        - pow_algo_raw
+        - pow_data
+        - pow_algo
+        - difficulty
+        - kernel_count
+        - output_count
+        - pool_tag
+        - reward_micro_minotari
+      properties:
+        height:
+          type: integer
+          format: int64
+          minimum: 0
+        hash:
+          type: string
+          description: Hex-encoded BlockHeader.Hash.
+        version:
+          type: integer
+          format: int32
+          minimum: 0
+        prev_hash:
+          type: string
+          description: Hex-encoded BlockHeader.PrevHash.
+        timestamp:
+          type: integer
+          format: int64
+          description: Unix seconds.
+        output_mr:
+          type: string
+          format: byte
+          description: Base64-encoded raw bytes (BlockHeader.OutputMr).
+        block_output_mr:
+          type: string
+          format: byte
+          description: Base64-encoded raw bytes (BlockHeader.BlockOutputMr).
+        kernel_mr:
+          type: string
+          format: byte
+          description: Base64-encoded raw bytes (BlockHeader.KernelMr).
+        input_mr:
+          type: string
+          format: byte
+          description: Base64-encoded raw bytes (BlockHeader.InputMr).
+        total_kernel_offset:
+          type: string
+          format: byte
+          description: Base64-encoded raw bytes (BlockHeader.TotalKernelOffset).
+        nonce:
+          type: integer
+          format: int64
+          minimum: 0
+        kernel_mmr_size:
+          type: integer
+          format: int64
+          minimum: 0
+        output_mmr_size:
+          type: integer
+          format: int64
+          minimum: 0
+        total_script_offset:
+          type: string
+          format: byte
+          description: Base64-encoded raw bytes (BlockHeader.TotalScriptOffset).
+        validator_node_mr:
+          type: string
+          format: byte
+          description: Base64-encoded raw bytes (BlockHeader.ValidatorNodeMr).
+        validator_node_size:
+          type: integer
+          format: int64
+          minimum: 0
+        pow_algo_raw:
+          type: integer
+          format: int64
+          minimum: 0
+          description: >-
+            Raw ProofOfWork.pow_algo wire id (0=RXM, 1=SHA3X, 2=RXT, 3=C29) - the
+            unclassified value pow_algo below is derived from.
+        pow_data:
+          type: string
+          format: byte
+          description: Base64-encoded raw bytes (ProofOfWork.pow_data).
+        pow_algo:
+          type: string
+          enum: [RXM, RXT, C29, SHA3X]
+          description: Classified algo string (see internal/poolattr.AlgoFromRaw).
+        difficulty:
+          type: integer
+          format: int64
+        kernel_count:
+          type: integer
+          format: int32
+          minimum: 0
+        output_count:
+          type: integer
+          format: int32
+          minimum: 0
+        pool_tag:
+          type: string
+          nullable: true
+          description: Null means unattributed.
+        reward_micro_minotari:
+          type: integer
+          format: int64
+          minimum: 0
+          description: >-
+            Raw MicroMinotari coinbase reward. 0 means "unknown" (BulletProofPlus-
+            hidden, or not yet backfilled - see migrations/0008_reward_micro_minotari
+            .up.sql), not "no reward".
+
+    Kernel:
+      type: object
+      description: >-
+        Mirrors `db.Kernel` exactly - one row per TransactionKernel found in a
+        block's body. `[]byte` fields marshal as base64 strings via
+        `encoding/json`'s default behavior (raw-struct convention, no per-field hex
+        encoding).
+      required:
+        - block_height
+        - index
+        - features
+        - fee
+        - lock_height
+        - excess
+        - excess_sig_nonce
+        - excess_sig_signature
+        - hash
+      properties:
+        block_height:
+          type: integer
+          format: int64
+          minimum: 0
+        index:
+          type: integer
+          format: int32
+          minimum: 0
+        features:
+          type: integer
+          format: int64
+          minimum: 0
+        fee:
+          type: integer
+          format: int64
+          minimum: 0
+          description: Raw MicroMinotari fee.
+        lock_height:
+          type: integer
+          format: int64
+          minimum: 0
+        excess:
+          type: string
+          format: byte
+        excess_sig_nonce:
+          type: string
+          format: byte
+          description: >-
+            Together with excess_sig_signature, the real wire Signature message
+            (public_nonce + signature) - the canonical per-transaction identifier
+            used by internal/txsearch is excess_sig_signature alone.
+        excess_sig_signature:
+          type: string
+          format: byte
+        hash:
+          type: string
+          format: byte
+
+    Output:
+      type: object
+      description: >-
+        Mirrors `db.Output` exactly - one row per TransactionOutput found in a
+        block's body. `[]byte` fields marshal as base64 strings (same raw-struct
+        convention as Kernel above).
+      required:
+        - block_height
+        - index
+        - features_version
+        - output_type
+        - maturity
+        - coinbase_extra
+        - commitment
+      properties:
+        block_height:
+          type: integer
+          format: int64
+          minimum: 0
+        index:
+          type: integer
+          format: int32
+          minimum: 0
+        features_version:
+          type: integer
+          format: int32
+          minimum: 0
+        output_type:
+          type: integer
+          format: int32
+          minimum: 0
+          description: >-
+            Raw wire OutputType id: 0=STANDARD, 1=COINBASE, 2=BURN,
+            3=VALIDATOR_NODE_REGISTRATION, 4=CODE_TEMPLATE_REGISTRATION. Returned as
+            the raw integer here (unlike the HTML view's `OutputTypeDisplay()`,
+            which renders the human name) - a value outside this known set is
+            possible and is not itself an API error.
+        maturity:
+          type: integer
+          format: int64
+          minimum: 0
+        coinbase_extra:
+          type: string
+          format: byte
+          description: >-
+            Base64-encoded raw bytes. Empty (not present) for most non-coinbase
+            outputs.
+        commitment:
+          type: string
+          format: byte
+          description: The output's homomorphic commitment - searchable via internal/txsearch.
+
+    ApiBlockDetail:
+      type: object
+      description: Mirrors the unexported `apiBlockDetail` DTO - GET /api/blocks/{height}'s body.
+      required: [block, kernels, outputs]
+      properties:
+        block:
+          $ref: "#/components/schemas/Block"
+        kernels:
+          type: array
+          items:
+            $ref: "#/components/schemas/Kernel"
+          description: Never null, even when empty - marshals as `[]`.
+        outputs:
+          type: array
+          items:
+            $ref: "#/components/schemas/Output"
+          description: Never null, even when empty - marshals as `[]`.
+
+    PoolStats:
+      type: object
+      description: Mirrors `poolstats.PoolStats` exactly - the pool backend's normalized stats.
+      required:
+        - hash_rate
+        - miners
+        - total_hashes
+        - last_block_found_time
+        - last_block_found
+        - total_blocks_found
+        - round_hashes
+        - total_miners_paid
+        - total_payments
+        - last_payment
+      properties:
+        hash_rate:
+          type: integer
+          format: int64
+          description: Pool's current reported hash rate (H/s).
+        miners:
+          type: integer
+          format: int64
+          description: Number of currently connected miners.
+        total_hashes:
+          type: integer
+          format: int64
+          description: Pool's lifetime cumulative hash count.
+        last_block_found_time:
+          type: integer
+          format: int64
+          description: Unix seconds the most recent block was found.
+        last_block_found:
+          type: integer
+          format: int64
+          description: Height of the most recently found block.
+        total_blocks_found:
+          type: integer
+          format: int64
+          description: Pool's lifetime count of blocks found.
+        round_hashes:
+          type: integer
+          format: int64
+          description: Cumulative hash count contributed so far in the current round.
+        total_miners_paid:
+          type: number
+          format: double
+          nullable: true
+          description: Lifetime amount paid out to miners. Null when the backend reports none.
+        total_payments:
+          type: number
+          format: double
+          nullable: true
+          description: Lifetime count/amount of payments made. Null when the backend reports none.
+        last_payment:
+          type: integer
+          format: int64
+          description: Unix seconds of the most recent payment run.
+
+    AlgoBucketRow:
+      type: object
+      description: >-
+        Mirrors `db.AlgoBucketRow` - a `[bucket_start, bucket_end]` inclusive height
+        range plus the count of blocks in that range attributed to each of the four
+        known pow-algo values.
+      required: [bucket_start, bucket_end, rxm, rxt, c29, sha3x]
+      properties:
+        bucket_start:
+          type: integer
+          format: int64
+          minimum: 0
+        bucket_end:
+          type: integer
+          format: int64
+          minimum: 0
+        rxm:
+          type: integer
+          format: int64
+          minimum: 0
+        rxt:
+          type: integer
+          format: int64
+          minimum: 0
+        c29:
+          type: integer
+          format: int64
+          minimum: 0
+        sha3x:
+          type: integer
+          format: int64
+          minimum: 0
+
+    PoolShareBucketRow:
+      type: object
+      description: >-
+        Mirrors `db.PoolShareBucketRow` - one (bucket, pool) row of the height-
+        bucketed pool market-share report. `pool_tag` is either a real pool_tag
+        value, the literal string `"unknown"` (blocks with a NULL pool_tag), or the
+        literal string `"other"` (blocks attributed to a real pool tag that didn't
+        make the top-N cut - see `db.PoolShareBucketCounts`).
+      required: [bucket_start, bucket_end, pool_tag, count]
+      properties:
+        bucket_start:
+          type: integer
+          format: int64
+          minimum: 0
+        bucket_end:
+          type: integer
+          format: int64
+          minimum: 0
+        pool_tag:
+          type: string
+        count:
+          type: integer
+          format: int64
+          minimum: 0
+
+    BlockTimeBucketRow:
+      type: object
+      description: >-
+        Mirrors `db.BlockTimeBucketRow` - the mean/median/sample-stddev/max
+        inter-block time (seconds) for blocks in `[bucket_start, bucket_end]` that
+        have a usable predecessor, plus how many blocks in that bucket actually
+        contributed a sample. mean_seconds/median_seconds/stddev_seconds/max_seconds
+        are all `null` (never coerced to 0) if the bucket had zero usable samples.
+      required: [bucket_start, bucket_end, mean_seconds, median_seconds, stddev_seconds, max_seconds, sample_count]
+      properties:
+        bucket_start:
+          type: integer
+          format: int64
+          minimum: 0
+        bucket_end:
+          type: integer
+          format: int64
+          minimum: 0
+        mean_seconds:
+          type: number
+          format: double
+          nullable: true
+        median_seconds:
+          type: number
+          format: double
+          nullable: true
+        stddev_seconds:
+          type: number
+          format: double
+          nullable: true
+        max_seconds:
+          type: integer
+          format: int64
+          nullable: true
+        sample_count:
+          type: integer
+          format: int64
+          minimum: 0
+
+    DifficultyBucketRow:
+      type: object
+      description: >-
+        Mirrors `db.DifficultyBucketRow` - for blocks in `[bucket_start, bucket_end]`,
+        the mean `difficulty` column value computed separately per pow_algo. Each of
+        rxm/rxt/c29/sha3x is `null` (never coerced to `0.0`) when that algo had zero
+        blocks in the bucket: `AVG()` over zero rows is SQL NULL, which means "no
+        data for this algo in this bucket" - semantically distinct from "the average
+        difficulty is exactly 0.0" (never a valid real value). RXM/RXT/C29/SHA3X
+        difficulties differ by orders of magnitude and are not meaningfully
+        comparable/summable across algos.
+      required: [bucket_start, bucket_end, rxm, rxt, c29, sha3x]
+      properties:
+        bucket_start:
+          type: integer
+          format: int64
+          minimum: 0
+        bucket_end:
+          type: integer
+          format: int64
+          minimum: 0
+        rxm:
+          type: number
+          format: double
+          nullable: true
+        rxt:
+          type: number
+          format: double
+          nullable: true
+        c29:
+          type: number
+          format: double
+          nullable: true
+        sha3x:
+          type: number
+          format: double
+          nullable: true
+
+    RewardBucketRow:
+      type: object
+      description: >-
+        Mirrors `db.RewardBucketRow` - structurally identical to AlgoBucketRow, but
+        each field is the SUM of raw MicroMinotari `reward_micro_minotari` for
+        blocks in that bucket attributed to that algo (not a block count). A bucket/
+        algo combination with zero blocks (or blocks whose reward is genuinely/
+        unknowably 0) sums to 0, not null - unlike DifficultyBucketRow's AVG()-based
+        nullability, SUM() over zero/all-zero rows is a real 0, not SQL NULL.
+      required: [bucket_start, bucket_end, rxm, rxt, c29, sha3x]
+      properties:
+        bucket_start:
+          type: integer
+          format: int64
+          minimum: 0
+        bucket_end:
+          type: integer
+          format: int64
+          minimum: 0
+        rxm:
+          type: integer
+          format: int64
+          minimum: 0
+        rxt:
+          type: integer
+          format: int64
+          minimum: 0
+        c29:
+          type: integer
+          format: int64
+          minimum: 0
+        sha3x:
+          type: integer
+          format: int64
+          minimum: 0
+
+    RewardPoolBucketRow:
+      type: object
+      description: >-
+        Mirrors `db.RewardPoolBucketRow` - PoolShareBucketRow's exact same "long"
+        (bucket, pool) row shape and unknown/other/real-tag `pool_tag` convention,
+        but `reward` is the SUM of raw MicroMinotari `reward_micro_minotari` for
+        that bucket/pool combination instead of a block count. top-N pool ranking is
+        still by block COUNT (not by summed reward), matching `/api/analysis/
+        pool-share`'s own top-N selection exactly.
+      required: [bucket_start, bucket_end, pool_tag, reward]
+      properties:
+        bucket_start:
+          type: integer
+          format: int64
+          minimum: 0
+        bucket_end:
+          type: integer
+          format: int64
+          minimum: 0
+        pool_tag:
+          type: string
+        reward:
+          type: integer
+          format: int64
+          minimum: 0
+
+    ApiTipInfo:
+      type: object
+      description: >-
+        Mirrors the unexported `apiTipInfo` DTO, built by hand from the real
+        `tari_generated.TipInfoResponse`/`MetaData` GRPC response fields (verified
+        against this module's actual go-tari-grpc-lib/v3 dependency, not guessed).
+      required:
+        - best_block_height
+        - best_block_hash
+        - accumulated_difficulty
+        - pruned_height
+        - timestamp
+        - initial_sync_achieved
+        - base_node_state
+        - failed_checkpoints
+      properties:
+        best_block_height:
+          type: integer
+          format: int64
+          minimum: 0
+        best_block_hash:
+          type: string
+          description: Hex-encoded MetaData.BestBlockHash.
+        accumulated_difficulty:
+          type: string
+          description: Hex-encoded MetaData.AccumulatedDifficulty.
+        pruned_height:
+          type: integer
+          format: int64
+          minimum: 0
+        timestamp:
+          type: integer
+          format: int64
+          description: MetaData.Timestamp, unix seconds.
+        initial_sync_achieved:
+          type: boolean
+        base_node_state:
+          type: string
+          enum:
+            - START_UP
+            - HEADER_SYNC
+            - HORIZON_SYNC
+            - CONNECTING
+            - BLOCK_SYNC
+            - LISTENING
+            - SYNC_FAILED
+          description: >-
+            Human enum name (BaseNodeState.String()) rather than the raw int32 wire
+            value.
+        failed_checkpoints:
+          type: boolean
+
+    ApiHealth:
+      type: object
+      required: [status, database]
+      properties:
+        status:
+          type: string
+          enum: [ok]
+          description: Always "ok" - this reflects the HTTP process being up, not database health.
+        database:
+          type: string
+          enum: [reachable, degraded]
+        error:
+          type: string
+          description: Present only when database is "degraded" - describes the underlying query error.
