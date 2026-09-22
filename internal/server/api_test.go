@@ -938,6 +938,15 @@ func TestHandleAPIDocs_DarkThemeOverrides(t *testing.T) {
 		// The "Servers" dropdown bar's white background, and native <select> chrome.
 		".swagger-ui .scheme-container { background: #17171b; }",
 		".swagger-ui select {",
+		// Per-parameter/per-response description text (renders through swagger-ui's
+		// markdown component as a bare <p> with no class of its own - the operation
+		// description override above doesn't reach it, see PR follow-up).
+		".swagger-ui .markdown p,",
+		".swagger-ui .renderedMarkdown p { color: #999; }",
+		// Parameter input fields (before=/limit=-style text boxes), both enabled and
+		// disabled (pre-"Try it out") states.
+		".swagger-ui input[type=text],",
+		".swagger-ui input[disabled],",
 	} {
 		if !strings.Contains(body, want) {
 			t.Errorf("body missing expected dark-theme override %q", want)
