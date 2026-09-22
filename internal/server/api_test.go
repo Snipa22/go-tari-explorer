@@ -10,6 +10,7 @@ import (
 	"errors"
 	"net"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/Snipa22/go-tari-grpc-lib/v3/tari_generated"
@@ -18,6 +19,7 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/status"
 	"google.golang.org/grpc/test/bufconn"
+	"gopkg.in/yaml.v3"
 
 	"github.com/Snipa22/go-tari-explorer/internal/db"
 	"github.com/Snipa22/go-tari-explorer/internal/nodeclient"
@@ -792,5 +794,106 @@ func TestHandleAPIHealth_DatabaseDegraded(t *testing.T) {
 	}
 	if got["error"] == "" {
 		t.Errorf("expected a non-empty error detail, got %+v", got)
+	}
+}
+
+// ---- GET /api/spec ----
+//
+// Neither /api/spec nor /api/docs (below) touch s.DB/s.PoolStats/s.Node at all (see
+// their handlers in api.go), so these tests construct a Server with a nil *db.DB
+// rather than requiring a real reachable Postgres instance like every other test in
+// this file - New itself never dereferences database, only stores it.
+
+func TestHandleAPISpec_YAML(t *testing.T) {
+	s, err := New(nil, nil, "", nil, nil)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	req := httptest.NewRequest("GET", "/api/spec", nil)
+	rec := httptest.NewRecorder()
+	s.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != 200 {
+		t.Fatalf("status = %d, want 200, body: %s", rec.Code, rec.Body.String())
+	}
+	if got := rec.Header().Get("Content-Type"); got != "application/yaml; charset=utf-8" {
+		t.Errorf("Content-Type = %q, want %q", got, "application/yaml; charset=utf-8")
+	}
+	body := rec.Body.Bytes()
+	if len(body) == 0 {
+		t.Fatal("body is empty, want non-empty YAML spec")
+	}
+	var doc map[string]any
+	if err := yaml.Unmarshal(body, &doc); err != nil {
+		t.Fatalf("body is not valid YAML: %v; body=%s", err, body)
+	}
+	if doc["openapi"] == nil {
+		t.Errorf("parsed YAML missing top-level \"openapi\" key, got: %+v", doc)
+	}
+	if _, ok := doc["paths"].(map[string]any); !ok {
+		t.Errorf("parsed YAML missing top-level \"paths\" map, got: %+v", doc["paths"])
+	}
+}
+
+func TestHandleAPISpec_JSONFormat(t *testing.T) {
+	s, err := New(nil, nil, "", nil, nil)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	req := httptest.NewRequest("GET", "/api/spec?format=json", nil)
+	rec := httptest.NewRecorder()
+	s.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != 200 {
+		t.Fatalf("status = %d, want 200, body: %s", rec.Code, rec.Body.String())
+	}
+	assertJSONContentType(t, rec)
+	doc := decodeJSON[map[string]any](t, rec)
+	if doc["openapi"] == nil {
+		t.Errorf("parsed JSON missing top-level \"openapi\" key, got: %+v", doc)
+	}
+	paths, ok := doc["paths"].(map[string]any)
+	if !ok {
+		t.Fatalf("parsed JSON missing top-level \"paths\" map, got: %+v", doc["paths"])
+	}
+	for _, route := range []string{
+		"/api/blocks", "/api/blocks/{height}", "/api/pool-stats",
+		"/api/analysis/algo-distribution", "/api/analysis/pool-share",
+		"/api/analysis/pool-algo-breakdown", "/api/analysis/block-time",
+		"/api/analysis/difficulty", "/api/analysis/rewards-by-algo",
+		"/api/analysis/rewards-by-pool", "/api/tip-info", "/api/health",
+	} {
+		if _, present := paths[route]; !present {
+			t.Errorf("parsed JSON spec missing path %q", route)
+		}
+	}
+}
+
+// ---- GET /api/docs ----
+
+func TestHandleAPIDocs(t *testing.T) {
+	s, err := New(nil, nil, "", nil, nil)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	req := httptest.NewRequest("GET", "/api/docs", nil)
+	rec := httptest.NewRecorder()
+	s.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != 200 {
+		t.Fatalf("status = %d, want 200, body: %s", rec.Code, rec.Body.String())
+	}
+	if got := rec.Header().Get("Content-Type"); got != "text/html; charset=utf-8" {
+		t.Errorf("Content-Type = %q, want %q", got, "text/html; charset=utf-8")
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, "swagger-ui-bundle.js") {
+		t.Errorf("body missing Swagger UI CDN script reference, got: %s", body)
+	}
+	if !strings.Contains(body, "/api/spec") {
+		t.Errorf("body missing reference to /api/spec as the Swagger UI spec URL, got: %s", body)
 	}
 }
