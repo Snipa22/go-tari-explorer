@@ -169,6 +169,13 @@ func New(database *db.DB, poolStatsProvider poolstats.PoolStatsProvider, poolSta
 // under one consistent policy is simpler than explaining why one of its two pages is
 // exempt. Its companion /mempool/history.png PNG endpoint is left unwrapped,
 // consistent with /analysis/*.png never being wrapped either.
+//
+// A dedicated /api/* JSON namespace (internal/server/api.go) is registered alongside
+// the above HTML+HTMX routes, not merged into them - see that file's package doc
+// comment. /api/tip-info joins the same rate-limited set as /search/tx-state/mempool/
+// (it triggers the same kind of live per-request base-node GRPC call); every other
+// /api/* route is Postgres-only (or, for /api/pool-stats, outbound-HTTP-only) and is
+// left unwrapped, mirroring /analysis/*'s own precedent.
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /", s.searchRateLimiter.rateLimitMiddleware(s.handleBlocksList))
@@ -195,6 +202,26 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /mempool", s.searchRateLimiter.rateLimitMiddleware(s.handleMempool))
 	mux.HandleFunc("GET /mempool/history", s.searchRateLimiter.rateLimitMiddleware(s.handleMempoolHistory))
 	mux.HandleFunc("GET /mempool/history.png", s.handleMempoolHistoryPNG)
+
+	// /api/* - see internal/server/api.go's package doc comment. /api/tip-info is
+	// wrapped in s.searchRateLimiter same as /search/tx-state/mempool/ above: it
+	// triggers exactly the same kind of live per-request GRPC call out to the
+	// operator's configured base node, so it shares that budget rather than getting
+	// its own independent allowance. Every other /api/* route below is a Postgres-only
+	// (or, for /api/pool-stats, outbound-HTTP-only) read, matching /analysis/*'s own
+	// unwrapped precedent.
+	mux.HandleFunc("GET /api/blocks", s.handleAPIBlocks)
+	mux.HandleFunc("GET /api/blocks/{height}", s.handleAPIBlockDetail)
+	mux.HandleFunc("GET /api/pool-stats", s.handleAPIPoolStats)
+	mux.HandleFunc("GET /api/analysis/algo-distribution", s.handleAPIAnalysisAlgoDistribution)
+	mux.HandleFunc("GET /api/analysis/pool-share", s.handleAPIAnalysisPoolShare)
+	mux.HandleFunc("GET /api/analysis/pool-algo-breakdown", s.handleAPIAnalysisPoolAlgoBreakdown)
+	mux.HandleFunc("GET /api/analysis/block-time", s.handleAPIAnalysisBlockTime)
+	mux.HandleFunc("GET /api/analysis/difficulty", s.handleAPIAnalysisDifficulty)
+	mux.HandleFunc("GET /api/analysis/rewards-by-algo", s.handleAPIAnalysisRewardsByAlgo)
+	mux.HandleFunc("GET /api/analysis/rewards-by-pool", s.handleAPIAnalysisRewardsByPool)
+	mux.HandleFunc("GET /api/tip-info", s.searchRateLimiter.rateLimitMiddleware(s.handleAPITipInfo))
+	mux.HandleFunc("GET /api/health", s.handleAPIHealth)
 	return mux
 }
 

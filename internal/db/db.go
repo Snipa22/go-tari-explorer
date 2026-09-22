@@ -118,46 +118,57 @@ func (d *DB) Migrate(ctx context.Context) error {
 // a breaking change to the UI layer. Every other BlockHeader/ProofOfWork field is carried
 // as its real wire type: []byte for proto `bytes` fields, uint64/uint32 for proto
 // integer fields.
+//
+// JSON tags below are consumed by internal/server/api.go's GET /api/blocks and
+// GET /api/blocks/{height} routes, which marshal this struct directly rather than
+// going through the HTML-only blockView adapter (blockView's TimeString()/
+// PoolDisplay()/etc. methods exist purely for template display and have no bearing on
+// the JSON API). The []byte fields (everything except Hash/PrevHash, which are already
+// hex strings) marshal via encoding/json's default []byte behavior (a base64 string) -
+// a deliberate scope decision, not an oversight: these are secondary merkle-root/offset
+// fields, not the primary searchable identifiers (unlike Kernel.ExcessSig*/
+// Output.Commitment, still base64 here too for the same "raw struct, no bespoke
+// per-field hex encoding" consistency - see the dispatch brief's PR description note).
 type Block struct {
 	// BlockHeader fields (github.com/Snipa22/go-tari-grpc-lib/v3/tari_generated.BlockHeader).
-	Height            uint64
-	Hash              string // hex-encoded BlockHeader.Hash
-	Version           uint32
-	PrevHash          string // hex-encoded BlockHeader.PrevHash
-	Timestamp         int64
-	OutputMr          []byte
-	BlockOutputMr     []byte
-	KernelMr          []byte
-	InputMr           []byte
-	TotalKernelOffset []byte
-	Nonce             uint64
-	KernelMmrSize     uint64
-	OutputMmrSize     uint64
-	TotalScriptOffset []byte
-	ValidatorNodeMr   []byte
-	ValidatorNodeSize uint64
+	Height            uint64 `json:"height"`
+	Hash              string `json:"hash"` // hex-encoded BlockHeader.Hash
+	Version           uint32 `json:"version"`
+	PrevHash          string `json:"prev_hash"` // hex-encoded BlockHeader.PrevHash
+	Timestamp         int64  `json:"timestamp"`
+	OutputMr          []byte `json:"output_mr"`
+	BlockOutputMr     []byte `json:"block_output_mr"`
+	KernelMr          []byte `json:"kernel_mr"`
+	InputMr           []byte `json:"input_mr"`
+	TotalKernelOffset []byte `json:"total_kernel_offset"`
+	Nonce             uint64 `json:"nonce"`
+	KernelMmrSize     uint64 `json:"kernel_mmr_size"`
+	OutputMmrSize     uint64 `json:"output_mmr_size"`
+	TotalScriptOffset []byte `json:"total_script_offset"`
+	ValidatorNodeMr   []byte `json:"validator_node_mr"`
+	ValidatorNodeSize uint64 `json:"validator_node_size"`
 
 	// ProofOfWork fields (BlockHeader.Pow), flattened with a pow_ prefix. PowAlgoRaw is
 	// the raw wire id (0=RXM, 1=SHA3X, 2=RXT, 3=C29); PowAlgo below is the classified
 	// string built from it via internal/poolattr.AlgoFromRaw - both are kept, see
 	// migrations/0002_block_header_decomposition.up.sql.
-	PowAlgoRaw uint64
-	PowData    []byte
+	PowAlgoRaw uint64 `json:"pow_algo_raw"`
+	PowData    []byte `json:"pow_data"`
 
 	// Block-level summary fields, derived from the block body (AggregateBody), not the
 	// header - pre-existing from 0001_init, unchanged by this decomposition.
-	PowAlgo     string // "RXM" | "RXT" | "C29" | "SHA3X" (see internal/poolattr)
-	Difficulty  int64
-	KernelCount int32
-	OutputCount int32
-	PoolTag     *string // nil == unattributed
+	PowAlgo     string  `json:"pow_algo"` // "RXM" | "RXT" | "C29" | "SHA3X" (see internal/poolattr)
+	Difficulty  int64   `json:"difficulty"`
+	KernelCount int32   `json:"kernel_count"`
+	OutputCount int32   `json:"output_count"`
+	PoolTag     *string `json:"pool_tag"` // nil == unattributed
 
 	// RewardMicroMinotari is the coinbase output's minimum_value_promise (raw
 	// MicroMinotari, uint64 wire type) - see migrations/0008_reward_micro_minotari.up.sql
 	// for the full derivation and why 0 means "unknown" (BulletProofPlus-hidden), not
 	// "no reward". Zero for any block indexed before that migration until backfilled
 	// (see cmd/reindex-rewards) or for a block with no coinbase output at all.
-	RewardMicroMinotari uint64
+	RewardMicroMinotari uint64 `json:"reward_micro_minotari"`
 }
 
 // UpsertBlock inserts or updates a single block row, keyed on height. Used by the
@@ -431,16 +442,20 @@ func (d *DB) RewardsForHeightRange(ctx context.Context, fromHeight, toHeight uin
 // RPC; ExcessSigNonce is carried alongside it because the two together make up the
 // real wire Signature message (public_nonce + signature), not because the nonce alone
 // is useful for lookups.
+// JSON tags mirror db.Block's own convention (see that type's doc comment) - []byte
+// fields marshal as base64 strings via encoding/json's default behavior, a raw-struct
+// choice consistent with every other JSON-tagged type in this package, not a per-field
+// hex-encoding pass. Consumed by internal/server/api.go's GET /api/blocks/{height}.
 type Kernel struct {
-	BlockHeight        uint64
-	Index              int32
-	Features           uint64
-	Fee                uint64
-	LockHeight         uint64
-	Excess             []byte
-	ExcessSigNonce     []byte
-	ExcessSigSignature []byte
-	Hash               []byte
+	BlockHeight        uint64 `json:"block_height"`
+	Index              int32  `json:"index"`
+	Features           uint64 `json:"features"`
+	Fee                uint64 `json:"fee"`
+	LockHeight         uint64 `json:"lock_height"`
+	Excess             []byte `json:"excess"`
+	ExcessSigNonce     []byte `json:"excess_sig_nonce"`
+	ExcessSigSignature []byte `json:"excess_sig_signature"`
+	Hash               []byte `json:"hash"`
 }
 
 // Output is the row shape for the `outputs` table: one row per
@@ -448,14 +463,17 @@ type Kernel struct {
 // (BlockHeight, Index). FeaturesVersion/OutputType/Maturity/CoinbaseExtra come from
 // the output's nested OutputFeatures message; Commitment is the output's own
 // homomorphic commitment, searchable via SearchUtxos.
+//
+// JSON tags mirror Kernel's own convention above (raw struct, default base64 []byte
+// encoding). Consumed by internal/server/api.go's GET /api/blocks/{height}.
 type Output struct {
-	BlockHeight     uint64
-	Index           int32
-	FeaturesVersion uint32
-	OutputType      uint32
-	Maturity        uint64
-	CoinbaseExtra   []byte
-	Commitment      []byte
+	BlockHeight     uint64 `json:"block_height"`
+	Index           int32  `json:"index"`
+	FeaturesVersion uint32 `json:"features_version"`
+	OutputType      uint32 `json:"output_type"`
+	Maturity        uint64 `json:"maturity"`
+	CoinbaseExtra   []byte `json:"coinbase_extra"`
+	Commitment      []byte `json:"commitment"`
 }
 
 // nonNilBytes coalesces a nil []byte to an empty (non-nil) one. Needed because
@@ -688,12 +706,12 @@ func (d *DB) FindOutputByCommitment(ctx context.Context, commitment []byte) (Out
 // [BucketStart, BucketEnd] inclusive height range, plus the count of blocks in that
 // range attributed to each of the four known internal/poolattr.PowAlgo values.
 type AlgoBucketRow struct {
-	BucketStart uint64
-	BucketEnd   uint64
-	RXM         int64
-	RXT         int64
-	C29         int64
-	SHA3X       int64
+	BucketStart uint64 `json:"bucket_start"`
+	BucketEnd   uint64 `json:"bucket_end"`
+	RXM         int64  `json:"rxm"`
+	RXT         int64  `json:"rxt"`
+	C29         int64  `json:"c29"`
+	SHA3X       int64  `json:"sha3x"`
 }
 
 // AlgoBucketCounts groups blocks in [fromHeight, toHeight] (inclusive) into consecutive
@@ -769,10 +787,10 @@ type PoolTagMapping struct {
 // bucket+pool combination) rather than AlgoBucketRow's fixed-column shape, because the
 // set of pool tags is open-ended/data-dependent while the four pow-algo values are not.
 type PoolShareBucketRow struct {
-	BucketStart uint64
-	BucketEnd   uint64
-	PoolTag     string
-	Count       int64
+	BucketStart uint64 `json:"bucket_start"`
+	BucketEnd   uint64 `json:"bucket_end"`
+	PoolTag     string `json:"pool_tag"`
+	Count       int64  `json:"count"`
 }
 
 // PoolShareBucketCounts groups blocks in [fromHeight, toHeight] (inclusive) into the
@@ -945,12 +963,12 @@ func (d *DB) AlgoBucketCountsForPool(ctx context.Context, bucketSize uint64, fro
 // internal/poolattr.PowAlgo values. Structurally identical to AlgoBucketRow, just
 // summing a value column instead of counting rows - see RewardBucketCountsByAlgo.
 type RewardBucketRow struct {
-	BucketStart uint64
-	BucketEnd   uint64
-	RXM         uint64
-	RXT         uint64
-	C29         uint64
-	SHA3X       uint64
+	BucketStart uint64 `json:"bucket_start"`
+	BucketEnd   uint64 `json:"bucket_end"`
+	RXM         uint64 `json:"rxm"`
+	RXT         uint64 `json:"rxt"`
+	C29         uint64 `json:"c29"`
+	SHA3X       uint64 `json:"sha3x"`
 }
 
 // RewardBucketCountsByAlgo groups blocks in [fromHeight, toHeight] (inclusive) into the
@@ -1002,10 +1020,10 @@ func (d *DB) RewardBucketCountsByAlgo(ctx context.Context, bucketSize uint64, fr
 // convention as PoolShareBucketRow (see that type's doc comment) - this is the same
 // "long" row shape for the same reason (an open-ended, data-dependent pool_tag set).
 type RewardPoolBucketRow struct {
-	BucketStart uint64
-	BucketEnd   uint64
-	PoolTag     string
-	Reward      uint64
+	BucketStart uint64 `json:"bucket_start"`
+	BucketEnd   uint64 `json:"bucket_end"`
+	PoolTag     string `json:"pool_tag"`
+	Reward      uint64 `json:"reward"`
 }
 
 // RewardBucketCountsByPool is PoolShareBucketCounts's exact mapping/topN/bucketing
@@ -1155,13 +1173,13 @@ func (d *DB) UnmappedPoolTags(ctx context.Context, mappings []PoolTagMapping) ([
 // outliers - the mean/stddev/max fields here exist for the per-bucket data table
 // (internal/server's newBlockTimeBucketTableView), not the chart.
 type BlockTimeBucketRow struct {
-	BucketStart   uint64
-	BucketEnd     uint64
-	MeanSeconds   *float64
-	MedianSeconds *float64
-	StdDevSeconds *float64
-	MaxSeconds    *int64
-	SampleCount   int64
+	BucketStart   uint64   `json:"bucket_start"`
+	BucketEnd     uint64   `json:"bucket_end"`
+	MeanSeconds   *float64 `json:"mean_seconds"`
+	MedianSeconds *float64 `json:"median_seconds"`
+	StdDevSeconds *float64 `json:"stddev_seconds"`
+	MaxSeconds    *int64   `json:"max_seconds"`
+	SampleCount   int64    `json:"sample_count"`
 }
 
 // blockTimeDeltasCTE computes, for each block in [fromHeight, toHeight], its time delta
@@ -1290,12 +1308,12 @@ func (d *DB) BlockTimeSummary(ctx context.Context, fromHeight, toHeight uint64) 
 // BlockTimeBucketRow.MedianSeconds for the same *float64-for-NULL convention already
 // used elsewhere in this file).
 type DifficultyBucketRow struct {
-	BucketStart uint64
-	BucketEnd   uint64
-	RXM         *float64
-	RXT         *float64
-	C29         *float64
-	SHA3X       *float64
+	BucketStart uint64   `json:"bucket_start"`
+	BucketEnd   uint64   `json:"bucket_end"`
+	RXM         *float64 `json:"rxm"`
+	RXT         *float64 `json:"rxt"`
+	C29         *float64 `json:"c29"`
+	SHA3X       *float64 `json:"sha3x"`
 }
 
 // DifficultyBucketAvg groups blocks in [fromHeight, toHeight] (inclusive) into the same

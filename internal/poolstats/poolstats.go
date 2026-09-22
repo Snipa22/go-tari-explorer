@@ -37,29 +37,34 @@ const defaultTimeout = 10 * time.Second
 // PoolStats is the explorer's own normalized view of pool-wide statistics, decoupled
 // from any one backend's JSON field names/types so a future backend swap doesn't ripple
 // into internal/server or its templates.
+//
+// JSON tags below are consumed by internal/server/api.go's GET /api/pool-stats route,
+// which marshals this struct directly rather than going through the HTML-only
+// poolStatsView adapter (whose HashRateDisplay()/etc. methods exist purely for template
+// display and have no bearing on the JSON API).
 type PoolStats struct {
 	// HashRate is the pool's current reported hash rate (H/s).
-	HashRate int64
+	HashRate int64 `json:"hash_rate"`
 	// Miners is the number of currently connected miners.
-	Miners int64
+	Miners int64 `json:"miners"`
 	// TotalHashes is the pool's lifetime cumulative hash count.
-	TotalHashes int64
+	TotalHashes int64 `json:"total_hashes"`
 	// LastBlockFoundTime is the unix timestamp (seconds) the most recent block was found.
-	LastBlockFoundTime int64
+	LastBlockFoundTime int64 `json:"last_block_found_time"`
 	// LastBlockFound is the height of the most recently found block.
-	LastBlockFound int64
+	LastBlockFound int64 `json:"last_block_found"`
 	// TotalBlocksFound is the pool's lifetime count of blocks found.
-	TotalBlocksFound int64
+	TotalBlocksFound int64 `json:"total_blocks_found"`
 	// RoundHashes is the cumulative hash count contributed so far in the current round.
-	RoundHashes int64
+	RoundHashes int64 `json:"round_hashes"`
 	// TotalMinersPaid is the lifetime amount paid out to miners, if the backend reports
 	// one; nil when the backend has no value (observed as JSON null on the live pool).
-	TotalMinersPaid *float64
+	TotalMinersPaid *float64 `json:"total_miners_paid"`
 	// TotalPayments is the lifetime count/amount of payments made, if reported; nil when
 	// the backend has no value (observed as JSON null on the live pool).
-	TotalPayments *float64
+	TotalPayments *float64 `json:"total_payments"`
 	// LastPayment is the unix timestamp (seconds) of the most recent payment run.
-	LastPayment int64
+	LastPayment int64 `json:"last_payment"`
 }
 
 // PoolStatsProvider is the seam between internal/server and whatever pool backend is
