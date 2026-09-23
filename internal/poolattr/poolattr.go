@@ -132,6 +132,26 @@ type ownPoolTag struct {
 // into ~45,900 spurious distinct values in the blocks table (one per garbage-suffix
 // variant). Keep this in sync with the reference implementation if it ever changes.
 //
+// Jagtech (canonicalName "Jagtech", bare prefix, no "WUF"): the active Jagtech node
+// family's pool infrastructure changed its coinbase-extra tag format to drop the
+// leading "WUF" prefix. Confirmed live against the production tari_explorer Postgres
+// DB on 2026-09-23: block height 351096 has pool_tag='JagtechE0ARs', octet_length
+// exactly 12, no WUF prefix and no trailing garbage. The old WUFJagtechE0/E1/S1/S2/
+// S3/U0/U1/U2 family stopped appearing after height 349135; this new bare-"Jagtech"
+// format starts at height 351096, so it's a format migration for the same operator,
+// not a new pool. tagLen 12 is inferred by analogy with the old scheme (same total
+// length as before, just without the 3-byte "WUF" prefix: "Jagtech" + 2-char node id
+// + a fixed 3-char suffix "ARs" = 12 bytes). Declaration order relative to the "WUF"
+// row above doesn't matter - "WUF" and "Jagtech" don't share a common prefix, so
+// first-match-wins ordering is a non-issue between these two rows specifically.
+//
+// Scope limitation: this bare-prefix drop is confirmed ONLY for the active Jagtech
+// family. The other WUF <legacy-name> tags in the WUF bucket above (WUF  Ahri   ,
+// WUF  Nytro  , WUF  Taila  , WUF Ara-Ayn , WUF Nia-Mio , WUF Stratum , WUFGraha'tia,
+// WUFY'shtola) all stopped appearing well before height 349135 (inactive/legacy test
+// nodes) and there is NO live evidence they also dropped WUF - do not generalize this
+// rule to them.
+//
 // supportxtm-* (canonicalName "SupportXTM"): confirmed as this operator's own pool
 // infrastructure (SupportXTM), same tier as WUF, not a third-party prefixTable entry.
 // go-crypto-pool's cmd/leaf-direct/main.go (mirrored by cmd/leaf-solo/main.go)
@@ -188,6 +208,7 @@ type ownPoolTag struct {
 // "supportxtm-sha3x-pplns" also has "supportxtm-sha3x" as a prefix.
 var ownPoolTags = []ownPoolTag{
 	{prefix: "WUF", tagLen: 12, canonicalName: "Jagtech"},
+	{prefix: "Jagtech", tagLen: 12, canonicalName: "Jagtech"},
 	{prefix: "supportxtm-sha3x-pplns", tagLen: 0, canonicalName: "SupportXTM"},
 	{prefix: "supportxtm-sha3x-solo", tagLen: 0, canonicalName: "SupportXTM"},
 	{prefix: "supportxtm-sha3x", tagLen: 16, canonicalName: "SupportXTM"},

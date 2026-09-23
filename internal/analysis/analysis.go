@@ -72,8 +72,20 @@ const DefaultTopPools = 8
 // same "SupportXTM" series keeps historical and current blocks from this infra
 // grouped together on the pool-share/algo-breakdown charts. Only ~35 historical
 // blocks are affected.
+//
+// Jagtech -> "Jagtech": a fourth own-pool prefix, folding into the SAME
+// canonicalName as WUF above rather than getting its own - it's the active Jagtech
+// node family's pool infrastructure after dropping the leading "WUF" prefix from its
+// coinbase-extra tag format. Confirmed via the same live evidence cited in
+// poolattr.go's ownPoolTags doc comment: block height 351096 has
+// pool_tag='JagtechE0ARs' in the production tari_explorer Postgres DB, confirmed
+// 2026-09-23. This entry keeps the old WUFJagtech* blocks and the new bare-Jagtech*
+// blocks grouped into the one "Jagtech" series on the pool-share/algo-breakdown
+// charts, since it's a tag-format change for the same node family/operator, not a
+// new pool.
 var DefaultPoolTagMappings = []db.PoolTagMapping{
 	{MatchPrefix: "WUF", CanonicalName: "Jagtech"},
+	{MatchPrefix: "Jagtech", CanonicalName: "Jagtech"},
 	{MatchPrefix: "supportxtm-", CanonicalName: "SupportXTM"},
 	{MatchPrefix: "GCPOOL-SOLO", CanonicalName: "SupportXTM"},
 }
