@@ -171,6 +171,12 @@ func TestPoolShare(t *testing.T) {
 // 351096, WUF prefix dropped - see poolattr.go's ownPoolTags doc comment for the live
 // evidence) folds into the SAME "Jagtech" series as the old WUFJagtech* tags, i.e. a
 // mix of old- and new-format tags from this node family still merge into one series.
+// The "JagtechE0ARs" value below is just an arbitrary stand-in pool_tag DB value used
+// to exercise the bare-"Jagtech"-prefix folding path (which is prefix-only in
+// DefaultPoolTagMappings and doesn't care about exact tag length) - it is NOT the
+// confirmed real coinbase-extra tag. The actual confirmed real tag, per the live hex
+// evidence in poolattr.go's ownPoolTags doc comment, is "JagtechE0" (9 bytes);
+// "JagtechE0ARs" was a corrupted stored value produced by an old attribution bug.
 func TestPoolShare_WithMappings(t *testing.T) {
 	database := setupTestDB(t)
 	ctx := context.Background()

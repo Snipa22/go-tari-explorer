@@ -60,13 +60,23 @@ func TestAttribute_KnownTags(t *testing.T) {
 		// data - see ourPoolTagLen's doc comment). This exercises the truncation itself.
 		{"own pool truncates trailing bytes", 0, "WUFJagtechE0-worker42", "WUFJagtechE0", true, PowAlgoRXM, ReasonOK},
 		// Jagtech's pool infra dropped the "WUF" prefix on its coinbase-extra tags.
-		// Confirmed live against production Postgres on 2026-09-23: block height
-		// 351096 has pool_tag='JagtechE0ARs', octet_length exactly 12, no WUF prefix.
-		{"own pool bare Jagtech no WUF prefix", 0, "JagtechE0ARs", "JagtechE0ARs", true, PowAlgoRXM, ReasonOK},
+		// Re-confirmed live against production Postgres on 2026-09-23 by decoding the
+		// RAW bytes (not the already-corrupted stored pool_tag column): block height
+		// 351096's coinbase_extra hex is 4a616774656368453000b0418a52c2fe04ee91c473dd.
+		// Bytes 0-8 decode to "JagtechE0" (the real 9-byte tag); byte 9 is a literal
+		// NUL, followed by non-printable/invalid-UTF8 garbage
+		// (\xb0\x41\x8a\x52\xc2\xfe\x04\xee\x91\xc4\x73\xdd) that happens to contain a
+		// few individually-ASCII-printable bytes ('A'=0x41, 'R'=0x52, 's'=0x73)
+		// scattered among it. This reproduces those exact real raw bytes (rather than a
+		// clean synthetic ASCII suffix) to prove the tag correctly stops at 9 bytes,
+		// before the NUL+garbage, instead of the old wrong tagLen=12 guess that
+		// (via the asciiPrintableOnly unknown-extra fallback) produced the misleading
+		// corrupted stored value "JagtechE0ARs".
+		{"own pool bare Jagtech no WUF prefix", 0, "JagtechE0\x00\xb0\x41\x8a\x52\xc2\xfe\x04\xee\x91\xc4\x73\xdd", "JagtechE0", true, PowAlgoRXM, ReasonOK},
 		// Same truncation behavior as the WUF-prefixed family above, just without the
-		// "WUF" prefix - trailing worker-id/garbage bytes past the 12-byte tag are
+		// "WUF" prefix - trailing worker-id/garbage bytes past the real 9-byte tag are
 		// dropped exactly the same way.
-		{"own pool bare Jagtech truncates trailing bytes", 0, "JagtechE0ARs-worker42", "JagtechE0ARs", true, PowAlgoRXM, ReasonOK},
+		{"own pool bare Jagtech truncates trailing bytes", 0, "JagtechE0-worker42", "JagtechE0", true, PowAlgoRXM, ReasonOK},
 		// Legacy/inactive node-name shape with embedded spaces, matching the real
 		// production byte pattern "WUF  Ahri   " (WUF + 2 spaces + "Ahri" + 3 trailing
 		// spaces = 12 bytes) once printable-filtered.

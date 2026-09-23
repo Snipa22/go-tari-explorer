@@ -134,23 +134,39 @@ type ownPoolTag struct {
 //
 // Jagtech (canonicalName "Jagtech", bare prefix, no "WUF"): the active Jagtech node
 // family's pool infrastructure changed its coinbase-extra tag format to drop the
-// leading "WUF" prefix. Confirmed live against the production tari_explorer Postgres
-// DB on 2026-09-23: block height 351096 has pool_tag='JagtechE0ARs', octet_length
-// exactly 12, no WUF prefix and no trailing garbage. The old WUFJagtechE0/E1/S1/S2/
-// S3/U0/U1/U2 family stopped appearing after height 349135; this new bare-"Jagtech"
-// format starts at height 351096, so it's a format migration for the same operator,
-// not a new pool. tagLen 12 is inferred by analogy with the old scheme (same total
-// length as before, just without the 3-byte "WUF" prefix: "Jagtech" + 2-char node id
-// + a fixed 3-char suffix "ARs" = 12 bytes). Declaration order relative to the "WUF"
-// row above doesn't matter - "WUF" and "Jagtech" don't share a common prefix, so
+// leading "WUF" prefix. PR #28 (commit 2f7423e) originally hardcoded tagLen=12 here,
+// but that was a wrong guess inferred by analogy with the old WUF-prefixed scheme,
+// not checked against the actual raw hex bytes - corrected below.
+//
+// Ground truth, re-confirmed live against the production tari_explorer Postgres DB on
+// 2026-09-23 by decoding the raw bytes directly (not the already-corrupted stored
+// pool_tag column): block height 351096's coinbase output has
+// encode(coinbase_extra,'hex') = 4a616774656368453000b0418a52c2fe04ee91c473dd. Byte-by-
+// byte: bytes 0-8 (4a 61 67 74 65 63 68 45 30) decode to ASCII "JagtechE0" - 9 printable
+// bytes, which IS the real tag: "Jagtech" (7 bytes) + a 2-char node id ("E0") = 9 bytes
+// total, i.e. exactly the old "WUFJagtechE0" tag's 12 bytes minus the dropped 3-byte
+// "WUF" prefix (12 - 3 = 9), with NO other suffix. Byte 9 (00) is a literal NUL,
+// followed by b0 41 8a 52 c2 fe 04 ee 91 c4 73 dd - non-printable/invalid-UTF8
+// nonce-buffer garbage, except that bytes 41 ('A'), 52 ('R'), and 73 ('s') are
+// individually ASCII-printable and happen to be scattered among that garbage.
+//
+// That's how the wrong tagLen=12 guess happened: the OLD code path (the
+// ReasonUnknownTxExtra fallback below, via asciiPrintableOnly) strips non-printable
+// bytes and concatenates whatever ASCII-printable bytes remain regardless of position,
+// which is how the corrupted stored value "JagtechE0ARs" (12 chars) ended up in the DB
+// - the real 9-byte tag "JagtechE0" plus the scattered 'A'/'R'/'s' garbage bytes
+// concatenated on, coincidentally spelling something clean-looking. PR #28 then
+// (wrongly) treated that already-corrupted 12-byte string as ground truth. There is no
+// real 12-byte tag; tagLen=9 is correct. Declaration order relative to the "WUF" row
+// above doesn't matter - "WUF" and "Jagtech" don't share a common prefix, so
 // first-match-wins ordering is a non-issue between these two rows specifically.
 //
-// Scope limitation: this bare-prefix drop is confirmed ONLY for the active Jagtech
-// family. The other WUF <legacy-name> tags in the WUF bucket above (WUF  Ahri   ,
-// WUF  Nytro  , WUF  Taila  , WUF Ara-Ayn , WUF Nia-Mio , WUF Stratum , WUFGraha'tia,
-// WUFY'shtola) all stopped appearing well before height 349135 (inactive/legacy test
-// nodes) and there is NO live evidence they also dropped WUF - do not generalize this
-// rule to them.
+// Scope limitation: this bare-prefix drop (and the corrected 9-byte length) is
+// confirmed ONLY for the active Jagtech family. The other WUF <legacy-name> tags in
+// the WUF bucket above (WUF  Ahri   , WUF  Nytro  , WUF  Taila  , WUF Ara-Ayn , WUF
+// Nia-Mio , WUF Stratum , WUFGraha'tia, WUFY'shtola) all stopped appearing well before
+// height 349135 (inactive/legacy test nodes) and there is NO live evidence they also
+// dropped WUF - do not generalize this rule to them.
 //
 // supportxtm-* (canonicalName "SupportXTM"): confirmed as this operator's own pool
 // infrastructure (SupportXTM), same tier as WUF, not a third-party prefixTable entry.
@@ -208,7 +224,7 @@ type ownPoolTag struct {
 // "supportxtm-sha3x-pplns" also has "supportxtm-sha3x" as a prefix.
 var ownPoolTags = []ownPoolTag{
 	{prefix: "WUF", tagLen: 12, canonicalName: "Jagtech"},
-	{prefix: "Jagtech", tagLen: 12, canonicalName: "Jagtech"},
+	{prefix: "Jagtech", tagLen: 9, canonicalName: "Jagtech"},
 	{prefix: "supportxtm-sha3x-pplns", tagLen: 0, canonicalName: "SupportXTM"},
 	{prefix: "supportxtm-sha3x-solo", tagLen: 0, canonicalName: "SupportXTM"},
 	{prefix: "supportxtm-sha3x", tagLen: 16, canonicalName: "SupportXTM"},
