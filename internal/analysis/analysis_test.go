@@ -167,15 +167,20 @@ func TestPoolShare(t *testing.T) {
 // TestPoolShare_WithMappings proves the WUF-family folding mechanism itself: multiple
 // distinct WUF-prefixed pool_tag values (different node suffixes) must be merged into
 // one "Jagtech" series, while a non-WUF pool tag and a NULL pool_tag remain their own
-// separate series.
+// separate series. It also proves the newer bare-"Jagtech" tag format (post-height
+// 351096, WUF prefix dropped - see poolattr.go's ownPoolTags doc comment for the live
+// evidence) folds into the SAME "Jagtech" series as the old WUFJagtech* tags, i.e. a
+// mix of old- and new-format tags from this node family still merge into one series.
 func TestPoolShare_WithMappings(t *testing.T) {
 	database := setupTestDB(t)
 	ctx := context.Background()
 
 	e0, s1, ahri := strPtr("WUFJagtechE0"), strPtr("WUFJagtechS1"), strPtr("WUF  Ahri   ")
+	bareE0 := strPtr("JagtechE0ARs")
 	other := strPtr("pool.kryptex.com")
-	// Bucket [0,999]: WUFJagtechE0 x2, WUFJagtechS1 x2, WUF  Ahri   x1 (all "Jagtech"
-	// once mapped = 5), pool.kryptex.com x2 (unmapped, own series), nil x1 (unknown).
+	// Bucket [0,999]: WUFJagtechE0 x2, WUFJagtechS1 x2, WUF  Ahri   x1, bare
+	// JagtechE0ARs x1 (all "Jagtech" once mapped = 6), pool.kryptex.com x2 (unmapped,
+	// own series), nil x1 (unknown).
 	seedBlock(t, database, 0, 1000, "RXM", 100, e0)
 	seedBlock(t, database, 1, 1010, "RXM", 100, e0)
 	seedBlock(t, database, 2, 1020, "RXT", 100, s1)
@@ -184,8 +189,12 @@ func TestPoolShare_WithMappings(t *testing.T) {
 	seedBlock(t, database, 5, 1050, "RXM", 100, other)
 	seedBlock(t, database, 6, 1060, "RXM", 100, other)
 	seedBlock(t, database, 7, 1070, "RXM", 100, nil)
+	seedBlock(t, database, 8, 1080, "RXM", 100, bareE0)
 
-	mappings := []db.PoolTagMapping{{MatchPrefix: "WUF", CanonicalName: "Jagtech"}}
+	mappings := []db.PoolTagMapping{
+		{MatchPrefix: "WUF", CanonicalName: "Jagtech"},
+		{MatchPrefix: "Jagtech", CanonicalName: "Jagtech"},
+	}
 	points, order, err := PoolShare(ctx, database, 1000, 0, 999, 8, mappings)
 	if err != nil {
 		t.Fatalf("PoolShare: %v", err)
@@ -194,17 +203,20 @@ func TestPoolShare_WithMappings(t *testing.T) {
 		t.Fatalf("len(points) = %d, want 1", len(points))
 	}
 	series := points[0].Series
-	if series["Jagtech"] != 5 {
-		t.Errorf("Jagtech = %v, want 5 (merged WUFJagtechE0+WUFJagtechS1+WUF  Ahri   )", series["Jagtech"])
+	if series["Jagtech"] != 6 {
+		t.Errorf("Jagtech = %v, want 6 (merged WUFJagtechE0+WUFJagtechS1+WUF  Ahri   +JagtechE0ARs)", series["Jagtech"])
 	}
 	if series["pool.kryptex.com"] != 2 {
-		t.Errorf("pool.kryptex.com = %v, want 2 (must stay its own series, unaffected by WUF mapping)", series["pool.kryptex.com"])
+		t.Errorf("pool.kryptex.com = %v, want 2 (must stay its own series, unaffected by WUF/Jagtech mapping)", series["pool.kryptex.com"])
 	}
 	if series["unknown"] != 1 {
 		t.Errorf("unknown = %v, want 1", series["unknown"])
 	}
 	if _, ok := series["WUFJagtechE0"]; ok {
 		t.Errorf("raw WUFJagtechE0 must not appear as its own series once mapped, got series=%+v", series)
+	}
+	if _, ok := series["JagtechE0ARs"]; ok {
+		t.Errorf("raw JagtechE0ARs must not appear as its own series once mapped, got series=%+v", series)
 	}
 	wantOrder := []string{"Jagtech", "pool.kryptex.com", "unknown"}
 	if len(order) != len(wantOrder) {

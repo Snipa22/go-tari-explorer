@@ -59,6 +59,14 @@ func TestAttribute_KnownTags(t *testing.T) {
 		// legitimate variable-length worker-ID feature (confirmed via live production
 		// data - see ourPoolTagLen's doc comment). This exercises the truncation itself.
 		{"own pool truncates trailing bytes", 0, "WUFJagtechE0-worker42", "WUFJagtechE0", true, PowAlgoRXM, ReasonOK},
+		// Jagtech's pool infra dropped the "WUF" prefix on its coinbase-extra tags.
+		// Confirmed live against production Postgres on 2026-09-23: block height
+		// 351096 has pool_tag='JagtechE0ARs', octet_length exactly 12, no WUF prefix.
+		{"own pool bare Jagtech no WUF prefix", 0, "JagtechE0ARs", "JagtechE0ARs", true, PowAlgoRXM, ReasonOK},
+		// Same truncation behavior as the WUF-prefixed family above, just without the
+		// "WUF" prefix - trailing worker-id/garbage bytes past the 12-byte tag are
+		// dropped exactly the same way.
+		{"own pool bare Jagtech truncates trailing bytes", 0, "JagtechE0ARs-worker42", "JagtechE0ARs", true, PowAlgoRXM, ReasonOK},
 		// Legacy/inactive node-name shape with embedded spaces, matching the real
 		// production byte pattern "WUF  Ahri   " (WUF + 2 spaces + "Ahri" + 3 trailing
 		// spaces = 12 bytes) once printable-filtered.
