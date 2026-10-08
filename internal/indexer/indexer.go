@@ -145,11 +145,24 @@ func (ix *Indexer) indexBlock(ctx context.Context, block *tari_generated.Block) 
 	attribution := poolattr.Attribute(header.GetHeight(), rawAlgo, len(outputs) > 0, coinbaseFound, coinbaseHasFeatures, coinbaseExtra)
 
 	var difficulty int64
-	if diff, err := ix.Node.GetNetworkDifficulty(ctx, header.GetHeight()); err == nil && diff != nil {
+	var adjustedDifficulty *int64
+	if diffs, err := ix.Node.GetNetworkDifficulty(ctx, header.GetHeight(), header.GetHeight()); err == nil && len(diffs) > 0 {
+		diff := diffs[0]
 		difficulty = int64(diff.GetDifficulty())
+		// AdjustedDifficulty is a proto3 `optional uint64` (*uint64 on the wire
+		// struct) - nil on a response from a base-node host that predates the
+		// TIP-004 field (see migrations/0010_adjusted_difficulty.up.sql). Leave the
+		// column NULL in that case rather than defaulting to 0, which would look
+		// like a real captured value given this column's nullable-vs-zero
+		// convention.
+		if diff.AdjustedDifficulty != nil {
+			v := int64(diff.GetAdjustedDifficulty())
+			adjustedDifficulty = &v
+		}
 	}
 	// A failed difficulty lookup is non-fatal for v1 - the block is still indexed with
-	// difficulty 0 rather than aborting the whole batch over a secondary metric.
+	// difficulty 0 (and adjusted_difficulty left NULL) rather than aborting the whole
+	// batch over a secondary metric.
 
 	var poolTag *string
 	if attribution.PoolTag != "" {
@@ -182,6 +195,7 @@ func (ix *Indexer) indexBlock(ctx context.Context, block *tari_generated.Block) 
 		OutputCount:         int32(len(outputs)),
 		PoolTag:             poolTag,
 		RewardMicroMinotari: rewardMicroMinotari,
+		AdjustedDifficulty:  adjustedDifficulty,
 	}
 	if err := ix.DB.UpsertBlock(ctx, row); err != nil {
 		return err

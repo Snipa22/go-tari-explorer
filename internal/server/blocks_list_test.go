@@ -16,9 +16,16 @@ import (
 // it seeds BOTH the old retrospective difficulty_snapshots table and the new
 // forward-looking template_difficulty_snapshots table with DISTINCT values for the
 // same algo/height, renders the actual front page through handleBlocksList (not just
-// the pure newAlgoGlanceRows helper), and asserts the rendered "Current block diff"
-// column reflects template_difficulty_snapshots' value - proving handleBlocksList
-// really did switch which table it reads, not just that both code paths compile.
+// the pure newAlgoGlanceRows helper), and asserts the rendered algo-glance row has
+// template_difficulty_snapshots' value in the "Current block diff" position and
+// difficulty_snapshots' value in the (separate, additive) "Last mined (recorded)"
+// position - proving handleBlocksList reads "current block diff" from the right
+// table, not just that both code paths compile. Unlike before the "Last mined
+// (recorded)"/"Last mined (real, TIP-004)" columns existed, difficulty_snapshots'
+// value is now LEGITIMATELY rendered on the page too (in its own column) - so this
+// test asserts on the exact rendered row shape (cell order/position) rather than a
+// blanket "value must never appear anywhere on the page", which would now be a false
+// positive.
 func TestHandleBlocksList_AlgoGlanceCurrentDifficulty_SourcedFromTemplateSnapshots(t *testing.T) {
 	d := openTestDB(t)
 	ctx := context.Background()
@@ -31,7 +38,8 @@ func TestHandleBlocksList_AlgoGlanceCurrentDifficulty_SourcedFromTemplateSnapsho
 
 	recordedAt := time.Now().UTC()
 
-	// Old retrospective table: must NOT be reflected in the rendered column anymore.
+	// Old retrospective table: must land in "Last mined (recorded)", not "Current
+	// block diff".
 	if _, err := d.UpsertDifficultySnapshot(ctx, db.DifficultySnapshot{
 		Algo:       "RXM",
 		Height:     100,
@@ -41,7 +49,7 @@ func TestHandleBlocksList_AlgoGlanceCurrentDifficulty_SourcedFromTemplateSnapsho
 		t.Fatalf("UpsertDifficultySnapshot: %v", err)
 	}
 
-	// New forward-looking table: must be what the rendered column shows.
+	// New forward-looking table: must be what "Current block diff" shows.
 	if _, err := d.UpsertTemplateDifficultySnapshot(ctx, db.TemplateDifficultySnapshot{
 		Algo:             "RXM",
 		Height:           100,
@@ -70,10 +78,11 @@ func TestHandleBlocksList_AlgoGlanceCurrentDifficulty_SourcedFromTemplateSnapsho
 	}
 	html := string(body)
 
-	if !strings.Contains(html, "22,222") {
-		t.Errorf("expected rendered page to contain template_difficulty_snapshots value %q, body:\n%s", "22,222", html)
-	}
-	if strings.Contains(html, "11,111") {
-		t.Errorf("rendered page contains old difficulty_snapshots value %q - the swap did not happen, body:\n%s", "11,111", html)
+	// RXM's algo-glance row: Algo, Blocks, Diff, Current block diff (22,222 from
+	// template_difficulty_snapshots), Last mined recorded (11,111 from
+	// difficulty_snapshots), Last mined adjusted (— : no adjusted_difficulty seeded).
+	wantRow := "<tr><td>RXM</td><td>0</td><td>0.00</td><td>22,222</td><td>11,111</td><td>—</td></tr>"
+	if !strings.Contains(html, wantRow) {
+		t.Errorf("expected rendered page to contain algo-glance row %q, body:\n%s", wantRow, html)
 	}
 }

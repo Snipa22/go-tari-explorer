@@ -23,7 +23,7 @@ func wantAlgoOrder(t *testing.T, got []algoGlanceRow) {
 }
 
 func TestNewAlgoGlanceRows_AlwaysReturnsAllAlgosInFixedOrder(t *testing.T) {
-	got := newAlgoGlanceRows(nil, nil)
+	got := newAlgoGlanceRows(nil, nil, nil)
 	wantAlgoOrder(t, got)
 }
 
@@ -35,7 +35,7 @@ func TestNewAlgoGlanceRows_AlgoPresentInBothInputs_UsesRealValues(t *testing.T) 
 		{Algo: "RXM", TargetDifficulty: 9876, Height: 100},
 	}
 
-	got := newAlgoGlanceRows(algos, snapshots)
+	got := newAlgoGlanceRows(algos, snapshots, nil)
 	wantAlgoOrder(t, got)
 
 	row := got[0] // RXM is analysis.AlgoOrder[0]
@@ -59,7 +59,7 @@ func TestNewAlgoGlanceRows_AlgoPresentInNeitherInput_DefaultsGracefully(t *testi
 		{Algo: "RXM", TargetDifficulty: 1},
 	}
 
-	got := newAlgoGlanceRows(algos, snapshots)
+	got := newAlgoGlanceRows(algos, snapshots, nil)
 	wantAlgoOrder(t, got)
 
 	var rxt algoGlanceRow
@@ -77,6 +77,12 @@ func TestNewAlgoGlanceRows_AlgoPresentInNeitherInput_DefaultsGracefully(t *testi
 	if rxt.CurrentDifficultyDisplay != "0" {
 		t.Errorf("RXT CurrentDifficultyDisplay = %q, want %q", rxt.CurrentDifficultyDisplay, "0")
 	}
+	if rxt.LastMinedDifficultyDisplay != "—" {
+		t.Errorf("RXT LastMinedDifficultyDisplay = %q, want %q", rxt.LastMinedDifficultyDisplay, "—")
+	}
+	if rxt.LastMinedAdjustedDifficultyDisplay != "—" {
+		t.Errorf("RXT LastMinedAdjustedDifficultyDisplay = %q, want %q", rxt.LastMinedAdjustedDifficultyDisplay, "—")
+	}
 }
 
 func TestNewAlgoGlanceRows_AlgoPresentOnlyInAlgos_CountAndAvgFromAlgosCurrentDiffDefaults(t *testing.T) {
@@ -84,7 +90,7 @@ func TestNewAlgoGlanceRows_AlgoPresentOnlyInAlgos_CountAndAvgFromAlgosCurrentDif
 		{Algo: "C29", Count: 7, AvgDifficulty: 55.5},
 	}
 
-	got := newAlgoGlanceRows(algos, nil)
+	got := newAlgoGlanceRows(algos, nil, nil)
 	wantAlgoOrder(t, got)
 
 	var c29 algoGlanceRow
@@ -102,6 +108,12 @@ func TestNewAlgoGlanceRows_AlgoPresentOnlyInAlgos_CountAndAvgFromAlgosCurrentDif
 	if c29.CurrentDifficultyDisplay != "0" {
 		t.Errorf("C29 CurrentDifficultyDisplay = %q, want %q", c29.CurrentDifficultyDisplay, "0")
 	}
+	if c29.LastMinedDifficultyDisplay != "—" {
+		t.Errorf("C29 LastMinedDifficultyDisplay = %q, want %q", c29.LastMinedDifficultyDisplay, "—")
+	}
+	if c29.LastMinedAdjustedDifficultyDisplay != "—" {
+		t.Errorf("C29 LastMinedAdjustedDifficultyDisplay = %q, want %q", c29.LastMinedAdjustedDifficultyDisplay, "—")
+	}
 }
 
 func TestNewAlgoGlanceRows_AlgoPresentOnlyInSnapshots_CurrentDiffFromSnapshotsCountAndAvgDefault(t *testing.T) {
@@ -109,7 +121,7 @@ func TestNewAlgoGlanceRows_AlgoPresentOnlyInSnapshots_CurrentDiffFromSnapshotsCo
 		{Algo: "SHA3X", TargetDifficulty: 4242, Height: 500},
 	}
 
-	got := newAlgoGlanceRows(nil, snapshots)
+	got := newAlgoGlanceRows(nil, snapshots, nil)
 	wantAlgoOrder(t, got)
 
 	var sha3x algoGlanceRow
@@ -143,8 +155,14 @@ func TestNewAlgoGlanceRows_InputOrderDoesNotAffectOutputOrder(t *testing.T) {
 		{Algo: "RXT", TargetDifficulty: 20},
 		{Algo: "RXM", TargetDifficulty: 10},
 	}
+	lastMined := []db.DifficultySnapshot{
+		{Algo: "RXT", Difficulty: 200},
+		{Algo: "RXM", Difficulty: 100},
+		{Algo: "SHA3X", Difficulty: 400},
+		{Algo: "C29", Difficulty: 300},
+	}
 
-	got := newAlgoGlanceRows(algos, snapshots)
+	got := newAlgoGlanceRows(algos, snapshots, lastMined)
 	wantAlgoOrder(t, got)
 
 	gotAlgos := make([]string, len(got))
@@ -153,5 +171,79 @@ func TestNewAlgoGlanceRows_InputOrderDoesNotAffectOutputOrder(t *testing.T) {
 	}
 	if !reflect.DeepEqual(gotAlgos, analysis.AlgoOrder) {
 		t.Errorf("output algo order = %v, want %v", gotAlgos, analysis.AlgoOrder)
+	}
+}
+
+// TestNewAlgoGlanceRows_LastMinedPresentWithAdjustedValue_UsesRealValues proves that
+// when an algo has a difficulty_snapshots row with a non-NULL AdjustedDifficulty, both
+// LastMinedDifficultyDisplay and LastMinedAdjustedDifficultyDisplay render the real
+// (humanized) values rather than the "—" missing-data placeholder.
+func TestNewAlgoGlanceRows_LastMinedPresentWithAdjustedValue_UsesRealValues(t *testing.T) {
+	adjusted := int64(54321)
+	lastMined := []db.DifficultySnapshot{
+		{Algo: "RXM", Height: 1000, Difficulty: 12345, AdjustedDifficulty: &adjusted},
+	}
+
+	got := newAlgoGlanceRows(nil, nil, lastMined)
+	wantAlgoOrder(t, got)
+
+	row := got[0] // RXM is analysis.AlgoOrder[0]
+	if row.LastMinedDifficultyDisplay != "12,345" {
+		t.Errorf("LastMinedDifficultyDisplay = %q, want %q", row.LastMinedDifficultyDisplay, "12,345")
+	}
+	if row.LastMinedAdjustedDifficultyDisplay != "54,321" {
+		t.Errorf("LastMinedAdjustedDifficultyDisplay = %q, want %q", row.LastMinedAdjustedDifficultyDisplay, "54,321")
+	}
+}
+
+// TestNewAlgoGlanceRows_LastMinedPresentWithNilAdjusted_RawShownAdjustedPlaceholder
+// proves that an algo whose difficulty_snapshots row HAS been captured (so
+// LastMinedDifficultyDisplay shows the real raw value) but whose AdjustedDifficulty is
+// still NULL (not yet backfilled/captured for that block) renders
+// LastMinedAdjustedDifficultyDisplay as "—", not "0" - the core nullable-vs-zero
+// distinction this feature depends on.
+func TestNewAlgoGlanceRows_LastMinedPresentWithNilAdjusted_RawShownAdjustedPlaceholder(t *testing.T) {
+	lastMined := []db.DifficultySnapshot{
+		{Algo: "SHA3X", Height: 2000, Difficulty: 99999, AdjustedDifficulty: nil},
+	}
+
+	got := newAlgoGlanceRows(nil, nil, lastMined)
+	wantAlgoOrder(t, got)
+
+	var sha3x algoGlanceRow
+	for _, r := range got {
+		if r.Algo == "SHA3X" {
+			sha3x = r
+		}
+	}
+	if sha3x.LastMinedDifficultyDisplay != "99,999" {
+		t.Errorf("LastMinedDifficultyDisplay = %q, want %q", sha3x.LastMinedDifficultyDisplay, "99,999")
+	}
+	if sha3x.LastMinedAdjustedDifficultyDisplay != "—" {
+		t.Errorf("LastMinedAdjustedDifficultyDisplay = %q, want %q (NULL must not render as 0)", sha3x.LastMinedAdjustedDifficultyDisplay, "—")
+	}
+}
+
+// TestNewAlgoGlanceRows_LastMinedAdjustedZeroIsDistinctFromNil proves a real captured
+// 0 (AdjustedDifficulty pointing at int64(0), as opposed to a nil pointer) renders as
+// the humanized "0", not the "—" missing-data placeholder - the two states must stay
+// distinguishable all the way through display.
+func TestNewAlgoGlanceRows_LastMinedAdjustedZeroIsDistinctFromNil(t *testing.T) {
+	zero := int64(0)
+	lastMined := []db.DifficultySnapshot{
+		{Algo: "RXT", Height: 3000, Difficulty: 500, AdjustedDifficulty: &zero},
+	}
+
+	got := newAlgoGlanceRows(nil, nil, lastMined)
+	wantAlgoOrder(t, got)
+
+	var rxt algoGlanceRow
+	for _, r := range got {
+		if r.Algo == "RXT" {
+			rxt = r
+		}
+	}
+	if rxt.LastMinedAdjustedDifficultyDisplay != "0" {
+		t.Errorf("LastMinedAdjustedDifficultyDisplay = %q, want %q (a real captured 0 must render as 0, not —)", rxt.LastMinedAdjustedDifficultyDisplay, "0")
 	}
 }
