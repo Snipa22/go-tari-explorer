@@ -118,3 +118,113 @@ func TestHandleBlockDetail_AdjustedDifficultyNilRendersNotYetCaptured(t *testing
 		t.Errorf("expected rendered page to show \"not yet captured\" for a NULL adjusted_difficulty, body:\n%s", html)
 	}
 }
+
+// TestHandleBlockDetail_RendersAchievedDifficultyRow is a template-level smoke test
+// for the block detail page's third difficulty row (see templates/block_detail.html):
+// proves the real HTTP handler, through the real html/template, renders
+// "Difficulty (achieved — actual mining power)" with its captured value - catching a
+// template-syntax/field-name typo that a pure Go unit test on
+// blockView.AchievedDifficultyDisplay alone wouldn't. Mirrors
+// TestHandleBlockDetail_RendersDifficultyRecordedAndAdjustedRows one column over.
+func TestHandleBlockDetail_RendersAchievedDifficultyRow(t *testing.T) {
+	d := openTestDB(t)
+	ctx := context.Background()
+
+	adjusted := int64(101_670)
+	achieved := int64(193_350)
+	if err := d.UpsertBlock(ctx, db.Block{
+		Height:             902,
+		Hash:               "ee",
+		PrevHash:           "ff",
+		OutputMr:           []byte{},
+		BlockOutputMr:      []byte{},
+		KernelMr:           []byte{},
+		InputMr:            []byte{},
+		TotalKernelOffset:  []byte{},
+		TotalScriptOffset:  []byte{},
+		ValidatorNodeMr:    []byte{},
+		PowData:            []byte{},
+		PowAlgo:            "RXT",
+		Difficulty:         50_835,
+		AdjustedDifficulty: &adjusted,
+		AchievedDifficulty: &achieved,
+	}); err != nil {
+		t.Fatalf("UpsertBlock: %v", err)
+	}
+
+	s, err := New(d, nil, "", nil, nil)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	req := httptest.NewRequest("GET", "/blocks/902", nil)
+	rec := httptest.NewRecorder()
+	s.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != 200 {
+		body, _ := io.ReadAll(rec.Body)
+		t.Fatalf("status = %d, want 200, body:\n%s", rec.Code, body)
+	}
+	body, err := io.ReadAll(rec.Body)
+	if err != nil {
+		t.Fatalf("read body: %v", err)
+	}
+	html := string(body)
+
+	if !strings.Contains(html, "<th>Difficulty (achieved — actual mining power)</th><td>193,350</td>") {
+		t.Errorf("expected rendered page to contain the achieved-difficulty row with value 193,350, body:\n%s", html)
+	}
+}
+
+// TestHandleBlockDetail_AchievedDifficultyNilRendersNotYetCaptured proves a block
+// whose achieved_difficulty is NULL (not yet backfilled/captured) renders the
+// explicit "not yet captured" placeholder in that row - never a blank or misleading
+// "0" - through the real handler/template, not just the pure blockView unit test.
+// Mirrors TestHandleBlockDetail_AdjustedDifficultyNilRendersNotYetCaptured one column
+// over.
+func TestHandleBlockDetail_AchievedDifficultyNilRendersNotYetCaptured(t *testing.T) {
+	d := openTestDB(t)
+	ctx := context.Background()
+
+	if err := d.UpsertBlock(ctx, db.Block{
+		Height:            903,
+		Hash:              "11",
+		PrevHash:          "22",
+		OutputMr:          []byte{},
+		BlockOutputMr:     []byte{},
+		KernelMr:          []byte{},
+		InputMr:           []byte{},
+		TotalKernelOffset: []byte{},
+		TotalScriptOffset: []byte{},
+		ValidatorNodeMr:   []byte{},
+		PowData:           []byte{},
+		PowAlgo:           "C29",
+		Difficulty:        1_000,
+		// AchievedDifficulty deliberately left nil/unset.
+	}); err != nil {
+		t.Fatalf("UpsertBlock: %v", err)
+	}
+
+	s, err := New(d, nil, "", nil, nil)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	req := httptest.NewRequest("GET", "/blocks/903", nil)
+	rec := httptest.NewRecorder()
+	s.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != 200 {
+		body, _ := io.ReadAll(rec.Body)
+		t.Fatalf("status = %d, want 200, body:\n%s", rec.Code, body)
+	}
+	body, err := io.ReadAll(rec.Body)
+	if err != nil {
+		t.Fatalf("read body: %v", err)
+	}
+	html := string(body)
+
+	if !strings.Contains(html, "<th>Difficulty (achieved — actual mining power)</th><td>not yet captured</td>") {
+		t.Errorf("expected rendered page to show \"not yet captured\" for a NULL achieved_difficulty, body:\n%s", html)
+	}
+}

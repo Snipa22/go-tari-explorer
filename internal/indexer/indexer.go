@@ -164,6 +164,22 @@ func (ix *Indexer) indexBlock(ctx context.Context, block *tari_generated.Block) 
 	// difficulty 0 (and adjusted_difficulty left NULL) rather than aborting the whole
 	// batch over a secondary metric.
 
+	// achievedDifficulty is the REAL proof-of-work difficulty this block's miner
+	// actually achieved (BlockHeaderResponse.GetDifficulty(), server-side sourced from
+	// acc_data.achieved_difficulty - see migrations/0011_achieved_difficulty.up.sql),
+	// captured via a parallel GetHeaderByHash lookup keyed by this block's own hash.
+	// Unlike AdjustedDifficulty above, BlockHeaderResponse.Difficulty is a plain
+	// (non-optional) uint64 - there's no wire-level "field absent" signal, so the
+	// nil-vs-captured distinction here is driven entirely by whether the GetHeaderByHash
+	// call itself succeeded. Same non-fatal-on-failure contract as the
+	// GetNetworkDifficulty call above: a failed/missing lookup leaves this column NULL
+	// rather than aborting the whole block index over a secondary metric.
+	var achievedDifficulty *int64
+	if hdr, err := ix.Node.GetHeaderByHash(ctx, header.GetHash()); err == nil {
+		v := int64(hdr.GetDifficulty())
+		achievedDifficulty = &v
+	}
+
 	var poolTag *string
 	if attribution.PoolTag != "" {
 		tag := attribution.PoolTag
@@ -196,6 +212,7 @@ func (ix *Indexer) indexBlock(ctx context.Context, block *tari_generated.Block) 
 		PoolTag:             poolTag,
 		RewardMicroMinotari: rewardMicroMinotari,
 		AdjustedDifficulty:  adjustedDifficulty,
+		AchievedDifficulty:  achievedDifficulty,
 	}
 	if err := ix.DB.UpsertBlock(ctx, row); err != nil {
 		return err
