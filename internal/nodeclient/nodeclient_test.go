@@ -27,6 +27,24 @@ type fakeBaseNodeServer struct {
 
 	template    *tari_generated.NewBlockTemplateResponse
 	templateErr error
+
+	// networkDifficulty/networkDifficultyErr back the fake GetNetworkDifficulty
+	// streaming RPC below - networkDifficulty is sent in order, one Send() call per
+	// entry, then the stream closes (returning the client's Recv() loop io.EOF).
+	networkDifficulty    []*tari_generated.NetworkDifficultyResponse
+	networkDifficultyErr error
+}
+
+func (f *fakeBaseNodeServer) GetNetworkDifficulty(req *tari_generated.HeightRequest, stream tari_generated.BaseNode_GetNetworkDifficultyServer) error {
+	if f.networkDifficultyErr != nil {
+		return f.networkDifficultyErr
+	}
+	for _, resp := range f.networkDifficulty {
+		if err := stream.Send(resp); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (f *fakeBaseNodeServer) GetMempoolTransactions(req *tari_generated.GetMempoolTransactionsRequest, stream tari_generated.BaseNode_GetMempoolTransactionsServer) error {
@@ -169,6 +187,88 @@ func TestGetNewBlockTemplate(t *testing.T) {
 	}
 	if reward := got.GetMinerData().GetReward(); reward != 5000000 {
 		t.Errorf("expected reward 5000000, got %d", reward)
+	}
+}
+
+// TestGetNetworkDifficulty_SingleHeight proves the pre-existing single-height call
+// shape (fromHeight == toHeight) round-trips a one-entry stream, including a non-nil
+// AdjustedDifficulty (the TIP-004 field this whole feature is about).
+func TestGetNetworkDifficulty_SingleHeight(t *testing.T) {
+	adjusted := uint64(320_000)
+	fake := &fakeBaseNodeServer{
+		networkDifficulty: []*tari_generated.NetworkDifficultyResponse{
+			{Height: 100, Difficulty: 10_000, AdjustedDifficulty: &adjusted},
+		},
+	}
+	client, cleanup := startFakeServer(t, fake)
+	defer cleanup()
+
+	got, err := client.GetNetworkDifficulty(context.Background(), 100, 100)
+	if err != nil {
+		t.Fatalf("GetNetworkDifficulty: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("expected 1 response, got %d: %+v", len(got), got)
+	}
+	if got[0].GetHeight() != 100 || got[0].GetDifficulty() != 10_000 {
+		t.Errorf("unexpected response: %+v", got[0])
+	}
+	if got[0].AdjustedDifficulty == nil || got[0].GetAdjustedDifficulty() != 320_000 {
+		t.Errorf("expected AdjustedDifficulty 320000, got %+v", got[0].AdjustedDifficulty)
+	}
+}
+
+// TestGetNetworkDifficulty_RangeDrainsEveryHeight proves a real [from, to] range
+// request drains every streamed response into the returned slice, in order - the
+// shape cmd/backfill-adjusted-difficulty relies on to fetch a whole batch of heights
+// in one GRPC round trip rather than N single-height calls.
+func TestGetNetworkDifficulty_RangeDrainsEveryHeight(t *testing.T) {
+	fake := &fakeBaseNodeServer{
+		networkDifficulty: []*tari_generated.NetworkDifficultyResponse{
+			{Height: 100, Difficulty: 10},
+			{Height: 101, Difficulty: 11},
+			{Height: 102, Difficulty: 12},
+		},
+	}
+	client, cleanup := startFakeServer(t, fake)
+	defer cleanup()
+
+	got, err := client.GetNetworkDifficulty(context.Background(), 100, 102)
+	if err != nil {
+		t.Fatalf("GetNetworkDifficulty: %v", err)
+	}
+	if len(got) != 3 {
+		t.Fatalf("expected 3 responses, got %d: %+v", len(got), got)
+	}
+	for i, wantHeight := range []uint64{100, 101, 102} {
+		if got[i].GetHeight() != wantHeight {
+			t.Errorf("got[%d].Height = %d, want %d", i, got[i].GetHeight(), wantHeight)
+		}
+	}
+}
+
+// TestGetNetworkDifficulty_MissingAdjustedDifficultyIsNil proves a response from a
+// (simulated) base-node host that predates the TIP-004 field round-trips with a nil
+// AdjustedDifficulty - never a coerced 0 - since callers (internal/indexer.go,
+// cmd/backfill-adjusted-difficulty) depend on nil to mean "not captured".
+func TestGetNetworkDifficulty_MissingAdjustedDifficultyIsNil(t *testing.T) {
+	fake := &fakeBaseNodeServer{
+		networkDifficulty: []*tari_generated.NetworkDifficultyResponse{
+			{Height: 200, Difficulty: 20}, // AdjustedDifficulty deliberately left unset
+		},
+	}
+	client, cleanup := startFakeServer(t, fake)
+	defer cleanup()
+
+	got, err := client.GetNetworkDifficulty(context.Background(), 200, 200)
+	if err != nil {
+		t.Fatalf("GetNetworkDifficulty: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("expected 1 response, got %d", len(got))
+	}
+	if got[0].AdjustedDifficulty != nil {
+		t.Errorf("expected AdjustedDifficulty to be nil (field absent on the wire), got %v", *got[0].AdjustedDifficulty)
 	}
 }
 

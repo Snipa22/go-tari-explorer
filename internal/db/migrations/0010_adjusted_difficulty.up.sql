@@ -1,0 +1,44 @@
+-- 0010_adjusted_difficulty: adds the TIP-RFC-MT-0004 backoff-adjusted ("real") target
+-- difficulty alongside the existing raw/unadjusted `difficulty` column, on both
+-- `blocks` and `difficulty_snapshots`.
+--
+-- Source field: NetworkDifficultyResponse.adjusted_difficulty (proto: field 12 on
+-- base_node.proto's NetworkDifficultyResponse, added in Tari core v6.1.0 / PR #8070
+-- "display the TIP-004 backoff adjusted target difficulty", picked up into
+-- go-tari-grpc-lib via PR #23). Go accessor:
+-- NetworkDifficultyResponse.GetAdjustedDifficulty() uint64, backed by an
+-- `AdjustedDifficulty *uint64` field (proto3 `optional`) - absent (nil) on a response
+-- from a node that predates this field, present and typically >= the raw `difficulty`
+-- otherwise (up to 32x it, after a run of consecutive same-algorithm blocks - the
+-- backoff mechanism TIP-RFC-MT-0004 describes). On MainNet today the backoff isn't
+-- scheduled yet, so adjusted_difficulty == difficulty for every MainNet block; that
+-- equality is expected, not a bug, and this schema/code makes no attempt to special-
+-- case it. Esmeralda testnet diverges from height 860000 onward.
+--
+-- Nullability: both new columns are nullable BIGINT, mirroring this schema's existing
+-- "NULL means genuinely not captured yet" convention used for pool_tag (see 0001_init)
+-- rather than reward_micro_minotari's NOT NULL DEFAULT 0 (see
+-- 0008_reward_micro_minotari.up.sql) - reward_micro_minotari can get away with "0
+-- means unknown" because 0 is never a real reward value for a successfully mined
+-- coinbase; adjusted_difficulty has no such safe sentinel (0 is never valid, but a
+-- real network difficulty can coincidentally equal small values during early/test
+-- chains, and more importantly callers need to tell "not yet backfilled/captured" apart
+-- from "node returned nil because it predates this field", both of which must render
+-- as an explicit "not yet captured"/"—", never a bare 0). So unlike
+-- reward_micro_minotari, this column is NULLable and NULL is the "not captured"
+-- sentinel, matching pool_tag's own nullable-vs-empty-string handling.
+--
+-- blocks.adjusted_difficulty: populated going forward by internal/indexer.go's
+-- indexBlock (same GetNetworkDifficulty call already made for the raw `difficulty`
+-- column) and, for already-indexed historical blocks, by the one-time
+-- cmd/backfill-adjusted-difficulty tool.
+--
+-- difficulty_snapshots.adjusted_difficulty: populated going forward by
+-- internal/difficultypoller.Poller.Tick, carried through from
+-- db.CurrentDifficultyPerAlgo's now-extended read of blocks.adjusted_difficulty for
+-- each algo's latest indexed block. Historical difficulty_snapshots rows are NOT
+-- backfilled by cmd/backfill-adjusted-difficulty (out of scope - see that command's
+-- doc comment); they simply stay NULL until naturally superseded by a newer snapshot
+-- row once this column is live.
+ALTER TABLE blocks ADD COLUMN IF NOT EXISTS adjusted_difficulty BIGINT;
+ALTER TABLE difficulty_snapshots ADD COLUMN IF NOT EXISTS adjusted_difficulty BIGINT;

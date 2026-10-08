@@ -90,10 +90,11 @@ func (p *Poller) Tick(ctx context.Context) (inserted int, err error) {
 	var firstErr error
 	for _, r := range rows {
 		ok, uerr := p.Sink.UpsertDifficultySnapshot(ctx, db.DifficultySnapshot{
-			Algo:       r.Algo,
-			Height:     r.Height,
-			Difficulty: r.Difficulty,
-			RecordedAt: now,
+			Algo:               r.Algo,
+			Height:             r.Height,
+			Difficulty:         r.Difficulty,
+			AdjustedDifficulty: r.AdjustedDifficulty,
+			RecordedAt:         now,
 		})
 		if uerr != nil {
 			if firstErr == nil {

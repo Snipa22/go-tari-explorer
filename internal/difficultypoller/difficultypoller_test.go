@@ -199,6 +199,52 @@ func TestTick_FetchErrorPropagatesWithoutInserting(t *testing.T) {
 	}
 }
 
+// TestTick_CarriesAdjustedDifficultyThrough proves Tick passes each row's
+// AdjustedDifficulty straight through into the upserted difficulty_snapshots row -
+// including nil (not yet captured for that block) - rather than dropping it or
+// coercing it to a real 0 (see migrations/0010_adjusted_difficulty.up.sql for why
+// that distinction matters).
+func TestTick_CarriesAdjustedDifficultyThrough(t *testing.T) {
+	database := openTestDB(t)
+	ctx := context.Background()
+
+	adjusted := int64(640_000)
+	fetcher := &fakeFetcher{
+		rows: []db.CurrentDifficultyRow{
+			{Algo: "RXM", Height: 1000, Difficulty: 20_000, AdjustedDifficulty: &adjusted},
+			{Algo: "SHA3X", Height: 2000, Difficulty: 5_000, AdjustedDifficulty: nil},
+		},
+	}
+
+	poller := New(fetcher, database)
+	if _, err := poller.Tick(ctx); err != nil {
+		t.Fatalf("Tick: %v", err)
+	}
+
+	rows, err := database.LatestDifficultySnapshots(ctx)
+	if err != nil {
+		t.Fatalf("LatestDifficultySnapshots: %v", err)
+	}
+	byAlgo := map[string]db.DifficultySnapshot{}
+	for _, r := range rows {
+		byAlgo[r.Algo] = r
+	}
+	rxm, ok := byAlgo["RXM"]
+	if !ok {
+		t.Fatal("expected RXM snapshot to be present")
+	}
+	if rxm.AdjustedDifficulty == nil || *rxm.AdjustedDifficulty != 640_000 {
+		t.Errorf("expected RXM AdjustedDifficulty 640000, got %+v", rxm.AdjustedDifficulty)
+	}
+	sha, ok := byAlgo["SHA3X"]
+	if !ok {
+		t.Fatal("expected SHA3X snapshot to be present")
+	}
+	if sha.AdjustedDifficulty != nil {
+		t.Errorf("expected SHA3X AdjustedDifficulty to be nil (not yet captured), got %v", *sha.AdjustedDifficulty)
+	}
+}
+
 // TestRun_TicksUntilContextCancelled proves Run keeps calling Tick on the configured
 // interval until its context is cancelled, then returns promptly with ctx.Err() - the
 // same graceful-shutdown contract internal/mempoolpoller.Poller.Run already provides.

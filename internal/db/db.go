@@ -169,6 +169,16 @@ type Block struct {
 	// "no reward". Zero for any block indexed before that migration until backfilled
 	// (see cmd/reindex-rewards) or for a block with no coinbase output at all.
 	RewardMicroMinotari uint64 `json:"reward_micro_minotari"`
+
+	// AdjustedDifficulty is the TIP-RFC-MT-0004 backoff-adjusted "real" target
+	// difficulty this block's proof of work actually had to beat
+	// (NetworkDifficultyResponse.GetAdjustedDifficulty(), see
+	// migrations/0010_adjusted_difficulty.up.sql for the full derivation and why this
+	// is nullable: nil means "not yet captured/backfilled", never "a real zero"). Nil
+	// for any block indexed before that migration until backfilled (see
+	// cmd/backfill-adjusted-difficulty) or if the configured base-node host predates
+	// the adjusted_difficulty proto field.
+	AdjustedDifficulty *int64 `json:"adjusted_difficulty"`
 }
 
 // UpsertBlock inserts or updates a single block row, keyed on height. Used by the
@@ -180,9 +190,10 @@ func (d *DB) UpsertBlock(ctx context.Context, b Block) error {
 			output_mr, block_output_mr, kernel_mr, input_mr, total_kernel_offset, nonce,
 			pow_algo_raw, pow_data,
 			kernel_mmr_size, output_mmr_size, total_script_offset, validator_node_mr, validator_node_size,
-			pow_algo, difficulty, kernel_count, output_count, pool_tag, reward_micro_minotari
+			pow_algo, difficulty, kernel_count, output_count, pool_tag, reward_micro_minotari,
+			adjusted_difficulty
 		)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25)
 		ON CONFLICT (height) DO UPDATE SET
 			hash = EXCLUDED.hash,
 			version = EXCLUDED.version,
@@ -206,13 +217,15 @@ func (d *DB) UpsertBlock(ctx context.Context, b Block) error {
 			kernel_count = EXCLUDED.kernel_count,
 			output_count = EXCLUDED.output_count,
 			pool_tag = EXCLUDED.pool_tag,
-			reward_micro_minotari = EXCLUDED.reward_micro_minotari
+			reward_micro_minotari = EXCLUDED.reward_micro_minotari,
+			adjusted_difficulty = EXCLUDED.adjusted_difficulty
 	`,
 		b.Height, b.Hash, b.Version, b.PrevHash, b.Timestamp,
 		nonNilBytes(b.OutputMr), nonNilBytes(b.BlockOutputMr), nonNilBytes(b.KernelMr), nonNilBytes(b.InputMr), nonNilBytes(b.TotalKernelOffset), b.Nonce,
 		b.PowAlgoRaw, nonNilBytes(b.PowData),
 		b.KernelMmrSize, b.OutputMmrSize, nonNilBytes(b.TotalScriptOffset), nonNilBytes(b.ValidatorNodeMr), b.ValidatorNodeSize,
 		b.PowAlgo, b.Difficulty, b.KernelCount, b.OutputCount, b.PoolTag, b.RewardMicroMinotari,
+		b.AdjustedDifficulty,
 	)
 	if err != nil {
 		return fmt.Errorf("db: upsert block %d: %w", b.Height, err)
@@ -228,7 +241,8 @@ const blockColumns = `
 	output_mr, block_output_mr, kernel_mr, input_mr, total_kernel_offset, nonce,
 	pow_algo_raw, pow_data,
 	kernel_mmr_size, output_mmr_size, total_script_offset, validator_node_mr, validator_node_size,
-	pow_algo, difficulty, kernel_count, output_count, pool_tag, reward_micro_minotari
+	pow_algo, difficulty, kernel_count, output_count, pool_tag, reward_micro_minotari,
+	adjusted_difficulty
 `
 
 // scanBlockRow scans a row shaped like blockColumns into a Block.
@@ -239,6 +253,7 @@ func scanBlockRow(row pgx.Row, b *Block) error {
 		&b.PowAlgoRaw, &b.PowData,
 		&b.KernelMmrSize, &b.OutputMmrSize, &b.TotalScriptOffset, &b.ValidatorNodeMr, &b.ValidatorNodeSize,
 		&b.PowAlgo, &b.Difficulty, &b.KernelCount, &b.OutputCount, &b.PoolTag, &b.RewardMicroMinotari,
+		&b.AdjustedDifficulty,
 	)
 }
 
@@ -405,6 +420,57 @@ func (d *DB) SetRewardMicroMinotari(ctx context.Context, height uint64, rewardMi
 		return fmt.Errorf("db: set reward micro minotari for block %d: %w", height, err)
 	}
 	return nil
+}
+
+// SetAdjustedDifficulty updates just the adjusted_difficulty column for a single
+// block, keyed on height. Deliberately narrow (mirrors SetRewardMicroMinotari's own
+// rationale) rather than requiring a full UpsertBlock; this is the only method
+// cmd/backfill-adjusted-difficulty touches, so a scoped backfill of this one derived
+// column never needs (or risks overwriting) any other column on the row.
+// adjustedDifficulty is *int64 (not uint64) so callers can explicitly pass nil to
+// store SQL NULL - "not captured" (e.g. the base-node host didn't return the field) -
+// distinct from a real 0, matching this column's nullable-vs-zero-meaningful
+// convention (see migrations/0010_adjusted_difficulty.up.sql).
+func (d *DB) SetAdjustedDifficulty(ctx context.Context, height uint64, adjustedDifficulty *int64) error {
+	_, err := d.Pool.Exec(ctx, `UPDATE blocks SET adjusted_difficulty = $1 WHERE height = $2`, adjustedDifficulty, height)
+	if err != nil {
+		return fmt.Errorf("db: set adjusted difficulty for block %d: %w", height, err)
+	}
+	return nil
+}
+
+// AdjustedDifficultiesForHeightRange returns a map of height -> adjusted_difficulty
+// for every block in [fromHeight, toHeight] (inclusive) - the narrow read
+// cmd/backfill-adjusted-difficulty needs to diff a freshly-fetched-from-GRPC adjusted
+// difficulty value against what's currently stored, so it can log/skip a no-op update
+// (see SetAdjustedDifficulty) without pulling the full Block row (mirrors
+// RewardsForHeightRange's own narrower-than-GetBlock rationale for the same
+// reindex-tool use case). Unlike RewardsForHeightRange's map[uint64]uint64 (where 0 is
+// always a real, meaningful value), this returns map[uint64]*int64: a nil value means
+// the stored adjusted_difficulty is genuinely NULL ("not yet captured"), not a real 0 -
+// callers must treat nil and a pointer-to-0 as different states (see
+// AdjustedDifficultyChanged in cmd/backfill-adjusted-difficulty).
+func (d *DB) AdjustedDifficultiesForHeightRange(ctx context.Context, fromHeight, toHeight uint64) (map[uint64]*int64, error) {
+	rows, err := d.Pool.Query(ctx, `
+		SELECT height, adjusted_difficulty
+		FROM blocks
+		WHERE height BETWEEN $1 AND $2
+	`, fromHeight, toHeight)
+	if err != nil {
+		return nil, fmt.Errorf("db: adjusted difficulties for height range: %w", err)
+	}
+	defer rows.Close()
+
+	out := make(map[uint64]*int64)
+	for rows.Next() {
+		var height uint64
+		var adjustedDifficulty *int64
+		if err := rows.Scan(&height, &adjustedDifficulty); err != nil {
+			return nil, fmt.Errorf("db: adjusted difficulties for height range: scan: %w", err)
+		}
+		out[height] = adjustedDifficulty
+	}
+	return out, rows.Err()
 }
 
 // RewardsForHeightRange returns a map of height -> reward_micro_minotari for every
@@ -1461,6 +1527,11 @@ type CurrentDifficultyRow struct {
 	Algo       string
 	Difficulty int64
 	Height     int64
+
+	// AdjustedDifficulty mirrors Block.AdjustedDifficulty for this same row - nil
+	// means "not yet captured" for that block, never a real 0 (see
+	// migrations/0010_adjusted_difficulty.up.sql).
+	AdjustedDifficulty *int64
 }
 
 // CurrentDifficultyPerAlgo returns, for each pow-algo that has at least one indexed
@@ -1474,7 +1545,7 @@ type CurrentDifficultyRow struct {
 // reorder/pad the returned rows themselves.
 func (d *DB) CurrentDifficultyPerAlgo(ctx context.Context) ([]CurrentDifficultyRow, error) {
 	rows, err := d.Pool.Query(ctx, `
-		SELECT DISTINCT ON (pow_algo) pow_algo, difficulty, height
+		SELECT DISTINCT ON (pow_algo) pow_algo, difficulty, height, adjusted_difficulty
 		FROM blocks
 		ORDER BY pow_algo, height DESC
 	`)
@@ -1486,7 +1557,7 @@ func (d *DB) CurrentDifficultyPerAlgo(ctx context.Context) ([]CurrentDifficultyR
 	var out []CurrentDifficultyRow
 	for rows.Next() {
 		var r CurrentDifficultyRow
-		if err := rows.Scan(&r.Algo, &r.Difficulty, &r.Height); err != nil {
+		if err := rows.Scan(&r.Algo, &r.Difficulty, &r.Height, &r.AdjustedDifficulty); err != nil {
 			return nil, fmt.Errorf("db: current difficulty per algo: scan: %w", err)
 		}
 		out = append(out, r)
@@ -1508,6 +1579,12 @@ type DifficultySnapshot struct {
 	Height     int64
 	Difficulty int64
 	RecordedAt time.Time
+
+	// AdjustedDifficulty mirrors Block.AdjustedDifficulty/CurrentDifficultyRow's own
+	// field (see those types' doc comments): nil means "not yet captured" for the
+	// block this snapshot came from, never a real 0 (see
+	// migrations/0010_adjusted_difficulty.up.sql).
+	AdjustedDifficulty *int64
 }
 
 // UpsertDifficultySnapshot inserts a new difficulty_snapshots row for s.Algo/s.Height,
@@ -1519,10 +1596,10 @@ type DifficultySnapshot struct {
 // without a separate existence-check query.
 func (d *DB) UpsertDifficultySnapshot(ctx context.Context, s DifficultySnapshot) (inserted bool, err error) {
 	tag, err := d.Pool.Exec(ctx, `
-		INSERT INTO difficulty_snapshots (algo, height, difficulty, recorded_at)
-		VALUES ($1, $2, $3, $4)
+		INSERT INTO difficulty_snapshots (algo, height, difficulty, adjusted_difficulty, recorded_at)
+		VALUES ($1, $2, $3, $4, $5)
 		ON CONFLICT (algo, height) DO NOTHING
-	`, s.Algo, s.Height, s.Difficulty, s.RecordedAt)
+	`, s.Algo, s.Height, s.Difficulty, s.AdjustedDifficulty, s.RecordedAt)
 	if err != nil {
 		return false, fmt.Errorf("db: upsert difficulty snapshot: %w", err)
 	}
@@ -1537,7 +1614,7 @@ func (d *DB) UpsertDifficultySnapshot(ctx context.Context, s DifficultySnapshot)
 // value could technically be recomputed live from `blocks` each time.
 func (d *DB) LatestDifficultySnapshots(ctx context.Context) ([]DifficultySnapshot, error) {
 	rows, err := d.Pool.Query(ctx, `
-		SELECT DISTINCT ON (algo) id, algo, height, difficulty, recorded_at
+		SELECT DISTINCT ON (algo) id, algo, height, difficulty, adjusted_difficulty, recorded_at
 		FROM difficulty_snapshots
 		ORDER BY algo, height DESC
 	`)
@@ -1549,7 +1626,7 @@ func (d *DB) LatestDifficultySnapshots(ctx context.Context) ([]DifficultySnapsho
 	var out []DifficultySnapshot
 	for rows.Next() {
 		var s DifficultySnapshot
-		if err := rows.Scan(&s.ID, &s.Algo, &s.Height, &s.Difficulty, &s.RecordedAt); err != nil {
+		if err := rows.Scan(&s.ID, &s.Algo, &s.Height, &s.Difficulty, &s.AdjustedDifficulty, &s.RecordedAt); err != nil {
 			return nil, fmt.Errorf("db: latest difficulty snapshots: scan: %w", err)
 		}
 		out = append(out, s)

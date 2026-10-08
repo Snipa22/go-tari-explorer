@@ -3,7 +3,7 @@ module github.com/Snipa22/go-tari-explorer
 go 1.25
 
 require (
-	github.com/Snipa22/go-tari-grpc-lib/v3 v3.2.0
+	github.com/Snipa22/go-tari-grpc-lib/v3 v3.2.1-0.20261008165614-60aa2c9f29d7
 	github.com/jackc/pgx/v5 v5.7.5
 	github.com/wcharczuk/go-chart/v2 v2.1.2
 	golang.org/x/image v0.18.0

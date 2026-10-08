@@ -184,15 +184,32 @@ func (c *Client) GetBlockByHeight(ctx context.Context, heights []uint64) ([]*tar
 	})
 }
 
-// GetNetworkDifficulty returns network difficulty info for a single height, with
-// failover across configured hosts.
-func (c *Client) GetNetworkDifficulty(ctx context.Context, height uint64) (*tari_generated.NetworkDifficultyResponse, error) {
-	return withFailover(c, ctx, func(ctx context.Context, client tari_generated.BaseNodeClient) (*tari_generated.NetworkDifficultyResponse, error) {
-		diffClient, err := client.GetNetworkDifficulty(ctx, &tari_generated.HeightRequest{StartHeight: height, EndHeight: height})
+// GetNetworkDifficulty returns network difficulty info for every height in
+// [fromHeight, toHeight] (inclusive), via the GetNetworkDifficulty streaming RPC
+// (HeightRequest.StartHeight/EndHeight - see that type's doc comment: "If
+// start_height and end_height are set and > 0, they take precedence, otherwise
+// from_tip is used"), with failover across configured hosts. Pass fromHeight ==
+// toHeight for a single height (the pre-existing call shape); the response slice is
+// not guaranteed to have one entry per requested height (a node may omit a height it
+// has no data for), so callers should index by each response's own GetHeight() rather
+// than assume positional alignment with the requested range.
+func (c *Client) GetNetworkDifficulty(ctx context.Context, fromHeight, toHeight uint64) ([]*tari_generated.NetworkDifficultyResponse, error) {
+	return withFailover(c, ctx, func(ctx context.Context, client tari_generated.BaseNodeClient) ([]*tari_generated.NetworkDifficultyResponse, error) {
+		stream, err := client.GetNetworkDifficulty(ctx, &tari_generated.HeightRequest{StartHeight: fromHeight, EndHeight: toHeight})
 		if err != nil {
 			return nil, err
 		}
-		return diffClient.Recv()
+		var out []*tari_generated.NetworkDifficultyResponse
+		for {
+			resp, err := stream.Recv()
+			if err != nil {
+				if err == io.EOF {
+					return out, nil
+				}
+				return nil, err
+			}
+			out = append(out, resp)
+		}
 	})
 }
 

@@ -34,10 +34,10 @@
         </table>
     </div>
     <table class="glance-table">
-        <thead><tr><th>Algo</th><th>Blocks</th><th>Diff</th><th>Current block diff</th></tr></thead>
+        <thead><tr><th>Algo</th><th>Blocks</th><th>Diff</th><th>Current block diff</th><th>Last mined (recorded)</th><th>Last mined (real, TIP-004)</th></tr></thead>
         <tbody>
         {{range .AlgoGlance}}
-        <tr><td>{{.Algo}}</td><td>{{.CountDisplay}}</td><td>{{.AvgDifficultyDisplay}}</td><td>{{.CurrentDifficultyDisplay}}</td></tr>
+        <tr><td>{{.Algo}}</td><td>{{.CountDisplay}}</td><td>{{.AvgDifficultyDisplay}}</td><td>{{.CurrentDifficultyDisplay}}</td><td>{{.LastMinedDifficultyDisplay}}</td><td>{{.LastMinedAdjustedDifficultyDisplay}}</td></tr>
         {{end}}
         </tbody>
     </table>
