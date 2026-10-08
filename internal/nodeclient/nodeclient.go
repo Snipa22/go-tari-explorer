@@ -353,6 +353,27 @@ func (c *Client) GetNewBlockTemplate(ctx context.Context, algo tari_generated.Po
 	})
 }
 
+// GetHeaderByHash returns the block header response for a single 32-byte block hash,
+// with failover across configured hosts. The returned BlockHeaderResponse.Difficulty
+// is set server-side from acc_data.achieved_difficulty (see
+// applications/minotari_node/src/grpc/base_node_grpc_server.rs's get_header_by_hash
+// handler and base_layer/node_components/src/blocks/block_header_accumulated_data.rs's
+// doc comment on AccumulatedBlockData's achieved_difficulty field) - the REAL amount
+// of proof-of-work a miner actually produced for that specific block, verified and
+// stored by the node at block-acceptance time, as opposed to blocks.difficulty/
+// blocks.adjusted_difficulty (both targets a block's PoW merely had to clear). This
+// is a unary RPC (unlike most of this file's streaming calls): GetHeaderByHashRequest
+// carries just the one `Hash []byte` field (see tari_generated.GetHeaderByHashRequest),
+// and BlockHeaderResponse.Difficulty is a plain (non-optional) uint64 - a failed call
+// (wrong/unknown hash, host unreachable after exhausting failover, etc.) surfaces as
+// a returned error rather than a present-but-zero field, so callers distinguishing
+// "not captured" from "really zero" must do so based on the error, not the response.
+func (c *Client) GetHeaderByHash(ctx context.Context, hash []byte) (*tari_generated.BlockHeaderResponse, error) {
+	return withFailover(c, ctx, func(ctx context.Context, client tari_generated.BaseNodeClient) (*tari_generated.BlockHeaderResponse, error) {
+		return client.GetHeaderByHash(ctx, &tari_generated.GetHeaderByHashRequest{Hash: hash})
+	})
+}
+
 // GetMempoolStats returns the base node's current aggregate mempool statistics -
 // unconfirmed transaction count, reorg transaction count, and total unconfirmed
 // weight - with failover across configured hosts. Unlike GetMempoolTransactions above,

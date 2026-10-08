@@ -281,6 +281,22 @@ func (b blockView) AdjustedDifficultyDisplay() string {
 	return humanizeInt(*b.AdjustedDifficulty)
 }
 
+// AchievedDifficultyDisplay renders b.AchievedDifficulty (the REAL proof-of-work
+// difficulty this block's miner actually achieved - see
+// migrations/0011_achieved_difficulty.up.sql) with the same comma-grouped formatting
+// humanizeInt gives every other difficulty display, or the explicit string
+// "not yet captured" when it's NULL (not yet backfilled/indexed with this field, or
+// the GetHeaderByHash lookup for this block's hash failed at index time) - never a
+// bare/blank 0, which would be indistinguishable from a genuinely zero (vanishingly
+// unlikely in practice, but not this method's job to assume impossible) captured
+// value. Mirrors AdjustedDifficultyDisplay's exact logic/wording one column over.
+func (b blockView) AchievedDifficultyDisplay() string {
+	if b.AchievedDifficulty == nil {
+		return "not yet captured"
+	}
+	return humanizeInt(*b.AchievedDifficulty)
+}
+
 func toBlockViews(blocks []db.Block) []blockView {
 	out := make([]blockView, len(blocks))
 	for i, b := range blocks {

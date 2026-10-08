@@ -33,6 +33,12 @@ type fakeBaseNodeServer struct {
 	// entry, then the stream closes (returning the client's Recv() loop io.EOF).
 	networkDifficulty    []*tari_generated.NetworkDifficultyResponse
 	networkDifficultyErr error
+
+	// headerByHash/headerByHashErr back the fake GetHeaderByHash unary RPC below -
+	// keyed by the hex-encoded request hash so a test can respond differently per
+	// hash; headerByHashErr (if set) takes precedence over any headerByHash entry.
+	headerByHash    map[string]*tari_generated.BlockHeaderResponse
+	headerByHashErr error
 }
 
 func (f *fakeBaseNodeServer) GetNetworkDifficulty(req *tari_generated.HeightRequest, stream tari_generated.BaseNode_GetNetworkDifficultyServer) error {
@@ -45,6 +51,17 @@ func (f *fakeBaseNodeServer) GetNetworkDifficulty(req *tari_generated.HeightRequ
 		}
 	}
 	return nil
+}
+
+func (f *fakeBaseNodeServer) GetHeaderByHash(ctx context.Context, req *tari_generated.GetHeaderByHashRequest) (*tari_generated.BlockHeaderResponse, error) {
+	if f.headerByHashErr != nil {
+		return nil, f.headerByHashErr
+	}
+	resp, ok := f.headerByHash[fmt.Sprintf("%x", req.GetHash())]
+	if !ok {
+		return nil, status.Error(codes.NotFound, "header not found for hash")
+	}
+	return resp, nil
 }
 
 func (f *fakeBaseNodeServer) GetMempoolTransactions(req *tari_generated.GetMempoolTransactionsRequest, stream tari_generated.BaseNode_GetMempoolTransactionsServer) error {
@@ -272,6 +289,52 @@ func TestGetNetworkDifficulty_MissingAdjustedDifficultyIsNil(t *testing.T) {
 	}
 }
 
+// TestGetHeaderByHash proves GetHeaderByHash round-trips a single 32-byte hash into
+// GetHeaderByHashRequest.Hash and returns the fake server's BlockHeaderResponse,
+// including its Difficulty field - the achieved_difficulty value this whole feature
+// exists to surface (see this method's doc comment in nodeclient.go).
+func TestGetHeaderByHash(t *testing.T) {
+	hash := []byte{0xde, 0xad, 0xbe, 0xef}
+	fake := &fakeBaseNodeServer{
+		headerByHash: map[string]*tari_generated.BlockHeaderResponse{
+			fmt.Sprintf("%x", hash): {
+				Header:     &tari_generated.BlockHeader{Height: 961162},
+				Difficulty: 193350,
+			},
+		},
+	}
+	client, cleanup := startFakeServer(t, fake)
+	defer cleanup()
+
+	got, err := client.GetHeaderByHash(context.Background(), hash)
+	if err != nil {
+		t.Fatalf("GetHeaderByHash: %v", err)
+	}
+	if got.GetHeader().GetHeight() != 961162 {
+		t.Errorf("Header.Height = %d, want 961162", got.GetHeader().GetHeight())
+	}
+	if got.GetDifficulty() != 193350 {
+		t.Errorf("Difficulty = %d, want 193350", got.GetDifficulty())
+	}
+}
+
+// TestGetHeaderByHash_UnknownHashReturnsError proves a hash the fake server has no
+// response for surfaces as an error (NotFound, here), not a zero-value
+// BlockHeaderResponse - callers (internal/indexer.go, cmd/backfill-achieved-difficulty)
+// depend on the error, rather than a present-but-zero Difficulty field, to detect a
+// failed/missing lookup (see this method's doc comment: BlockHeaderResponse.Difficulty
+// is a plain, non-optional uint64, unlike NetworkDifficultyResponse.AdjustedDifficulty).
+func TestGetHeaderByHash_UnknownHashReturnsError(t *testing.T) {
+	fake := &fakeBaseNodeServer{headerByHash: map[string]*tari_generated.BlockHeaderResponse{}}
+	client, cleanup := startFakeServer(t, fake)
+	defer cleanup()
+
+	_, err := client.GetHeaderByHash(context.Background(), []byte{0x01, 0x02})
+	if err == nil {
+		t.Fatal("expected an error for an unknown hash, got nil")
+	}
+}
+
 // startFakeServerPair boots two fake BaseNode servers on their own bufconn listeners
 // and returns a real *Client configured with BOTH as its host list (in order), so
 // tests can exercise withFailover's actual "first host fails, second succeeds"
@@ -346,5 +409,33 @@ func TestGetNewBlockTemplate_FailsOverToSecondHost(t *testing.T) {
 	}
 	if diff := got.GetMinerData().GetTargetDifficulty(); diff != 111 {
 		t.Errorf("expected target_difficulty 111 from the second host, got %d", diff)
+	}
+}
+
+// TestGetHeaderByHash_FailsOverToSecondHost proves that when the first configured
+// host's GetHeaderByHash call errors, withFailover retries against the second host
+// and returns its (successful) response rather than the first host's error - the same
+// failover contract every other method in this file gets, now exercised for
+// GetHeaderByHash too.
+func TestGetHeaderByHash_FailsOverToSecondHost(t *testing.T) {
+	hash := []byte{0xaa, 0xbb}
+	fake1 := &fakeBaseNodeServer{headerByHashErr: status.Error(codes.Unavailable, "boom: host 1 down")}
+	fake2 := &fakeBaseNodeServer{
+		headerByHash: map[string]*tari_generated.BlockHeaderResponse{
+			fmt.Sprintf("%x", hash): {
+				Header:     &tari_generated.BlockHeader{Height: 961162},
+				Difficulty: 193350,
+			},
+		},
+	}
+	client, cleanup := startFakeServerPair(t, fake1, fake2)
+	defer cleanup()
+
+	got, err := client.GetHeaderByHash(context.Background(), hash)
+	if err != nil {
+		t.Fatalf("GetHeaderByHash: expected failover to the second host to succeed, got error: %v", err)
+	}
+	if got.GetDifficulty() != 193350 {
+		t.Errorf("expected Difficulty 193350 from the second host, got %d", got.GetDifficulty())
 	}
 }

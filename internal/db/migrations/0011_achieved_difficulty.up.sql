@@ -1,0 +1,39 @@
+-- 0011_achieved_difficulty: adds the REAL achieved proof-of-work difficulty a block's
+-- miner actually produced, on `blocks` only (unlike `difficulty`/`adjusted_difficulty`,
+-- there is no analogous forward-looking "achieved" value for an unmined block, so
+-- `template_difficulty_snapshots`/`difficulty_snapshots` are out of scope here).
+--
+-- Source field: BlockHeaderResponse.difficulty (base_node.proto), returned by the
+-- GetHeaderByHash/GetHeaderByHeight/ListHeaders RPCs and set server-side from
+-- acc_data.achieved_difficulty - see
+-- applications/minotari_node/src/grpc/base_node_grpc_server.rs's get_header_by_hash
+-- handler (`difficulty: acc_data.achieved_difficulty.into()`) and
+-- base_layer/node_components/src/blocks/block_header_accumulated_data.rs's doc comment:
+-- "The achieved difficulty for solving the current block using the specified proof of
+-- work algorithm." This is the one number among difficulty/adjusted_difficulty/
+-- achieved_difficulty that is NOT a target: it's the actual amount of hashing power a
+-- miner produced for that specific block, verified and stored by the node at
+-- block-acceptance time - necessarily >= the block's adjusted_difficulty target (which
+-- is itself >= the raw difficulty target), confirmed live against Esmeralda testnet
+-- height 961162 (raw difficulty 50,835; TIP-004 adjusted 101,670; achieved 193,350).
+--
+-- Go accessor: BlockHeaderResponse.GetDifficulty() uint64 - unlike
+-- NetworkDifficultyResponse.AdjustedDifficulty (migrations/0010_adjusted_difficulty.up.sql),
+-- this is a plain (non-optional) proto3 uint64 field, so there is no wire-level way to
+-- distinguish "the node didn't report one" from "it reported zero" on a successful
+-- response; the "not captured" case here is entirely driven by the GRPC call itself
+-- failing (wrong/unknown hash, every configured host unreachable, etc. - see
+-- internal/nodeclient.Client.GetHeaderByHash's doc comment), not by an absent field.
+--
+-- Nullability: nullable BIGINT, same "NULL means genuinely not captured yet, never a
+-- coerced 0" convention as adjusted_difficulty - a failed/missing GetHeaderByHash
+-- lookup leaves this column NULL rather than writing a 0 that would be
+-- indistinguishable from a (vanishingly unlikely, but not this schema's job to assume
+-- impossible) real achieved difficulty of zero.
+--
+-- Populated going forward by internal/indexer.go's indexBlock (a parallel,
+-- non-fatal-on-failure GetHeaderByHash call keyed by the block's own hash, alongside
+-- the existing GetNetworkDifficulty call for difficulty/adjusted_difficulty) and, for
+-- already-indexed historical blocks, by the one-time cmd/backfill-achieved-difficulty
+-- tool.
+ALTER TABLE blocks ADD COLUMN IF NOT EXISTS achieved_difficulty BIGINT;

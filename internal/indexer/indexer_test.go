@@ -2,13 +2,16 @@ package indexer
 
 import (
 	"context"
+	"fmt"
 	"net"
 	"os"
 	"testing"
 
 	"github.com/Snipa22/go-tari-grpc-lib/v3/tari_generated"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/status"
 	"google.golang.org/grpc/test/bufconn"
 
 	"github.com/Snipa22/go-tari-explorer/internal/db"
@@ -65,6 +68,20 @@ type fakeBaseNodeServer struct {
 	// or simply has no data), matching GetNetworkDifficulty's "non-fatal, leave
 	// difficulty 0 / adjusted_difficulty NULL" contract.
 	networkDifficultyByHeight map[uint64]*tari_generated.NetworkDifficultyResponse
+
+	// headerByHash maps a hex-encoded block hash to the BlockHeaderResponse
+	// indexBlock's GetHeaderByHash(ctx, header.GetHash()) call should receive; a hash
+	// absent from this map gets a NotFound error (simulating a failed/missing lookup),
+	// matching GetHeaderByHash's "non-fatal, leave achieved_difficulty NULL" contract.
+	headerByHash map[string]*tari_generated.BlockHeaderResponse
+}
+
+func (f *fakeBaseNodeServer) GetHeaderByHash(ctx context.Context, req *tari_generated.GetHeaderByHashRequest) (*tari_generated.BlockHeaderResponse, error) {
+	resp, ok := f.headerByHash[fmt.Sprintf("%x", req.GetHash())]
+	if !ok {
+		return nil, status.Error(codes.NotFound, "header not found for hash")
+	}
+	return resp, nil
 }
 
 func (f *fakeBaseNodeServer) GetBlocks(req *tari_generated.GetBlocksRequest, stream tari_generated.BaseNode_GetBlocksServer) error {
@@ -232,5 +249,71 @@ func TestIndexBlock_FailedDifficultyLookupLeavesAdjustedDifficultyNull(t *testin
 	}
 	if got.AdjustedDifficulty != nil {
 		t.Errorf("AdjustedDifficulty = %v, want nil", *got.AdjustedDifficulty)
+	}
+}
+
+// TestIndexBlock_CapturesAchievedDifficulty proves Backfill (via indexBlock) stores
+// the base node's reported achieved difficulty (BlockHeaderResponse.Difficulty, from
+// a GetHeaderByHash lookup keyed on the block's own hash) on the block row, alongside
+// the pre-existing raw/adjusted difficulty columns - the "capture going forward" half
+// of this feature (see migrations/0011_achieved_difficulty.up.sql).
+func TestIndexBlock_CapturesAchievedDifficulty(t *testing.T) {
+	database := openIndexerTestDB(t)
+	ctx := context.Background()
+
+	block := fakeBlock(200)
+	fake := &fakeBaseNodeServer{
+		blocks: []*tari_generated.Block{block},
+		headerByHash: map[string]*tari_generated.BlockHeaderResponse{
+			fmt.Sprintf("%x", block.GetHeader().GetHash()): {
+				Header:     block.GetHeader(),
+				Difficulty: 193_350,
+			},
+		},
+	}
+	ix, cleanup := startFakeIndexer(t, fake, database)
+	defer cleanup()
+
+	if err := ix.Backfill(ctx, 200, 200); err != nil {
+		t.Fatalf("Backfill: %v", err)
+	}
+
+	got, err := database.GetBlock(ctx, 200)
+	if err != nil {
+		t.Fatalf("GetBlock: %v", err)
+	}
+	if got.AchievedDifficulty == nil || *got.AchievedDifficulty != 193_350 {
+		t.Fatalf("AchievedDifficulty = %+v, want 193350", got.AchievedDifficulty)
+	}
+}
+
+// TestIndexBlock_FailedHeaderByHashLookupLeavesAchievedDifficultyNull proves a block
+// whose hash has no corresponding entry in the fake server's headerByHash map
+// (simulating a failed GetHeaderByHash lookup - unknown hash, host error, etc.) still
+// indexes successfully, with achieved_difficulty left NULL rather than aborting the
+// whole block index over this secondary metric - the same non-fatal-on-failure
+// contract AdjustedDifficulty's own capture already has, now proven for
+// AchievedDifficulty too (see indexer.go's indexBlock doc comment on achievedDifficulty).
+func TestIndexBlock_FailedHeaderByHashLookupLeavesAchievedDifficultyNull(t *testing.T) {
+	database := openIndexerTestDB(t)
+	ctx := context.Background()
+
+	fake := &fakeBaseNodeServer{
+		blocks:       []*tari_generated.Block{fakeBlock(201)},
+		headerByHash: map[string]*tari_generated.BlockHeaderResponse{}, // no entry for this block's hash
+	}
+	ix, cleanup := startFakeIndexer(t, fake, database)
+	defer cleanup()
+
+	if err := ix.Backfill(ctx, 201, 201); err != nil {
+		t.Fatalf("Backfill: %v", err)
+	}
+
+	got, err := database.GetBlock(ctx, 201)
+	if err != nil {
+		t.Fatalf("GetBlock: %v", err)
+	}
+	if got.AchievedDifficulty != nil {
+		t.Errorf("AchievedDifficulty = %v, want nil (failed lookup is non-fatal)", *got.AchievedDifficulty)
 	}
 }

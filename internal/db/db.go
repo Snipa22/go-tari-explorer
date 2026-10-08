@@ -179,6 +179,17 @@ type Block struct {
 	// cmd/backfill-adjusted-difficulty) or if the configured base-node host predates
 	// the adjusted_difficulty proto field.
 	AdjustedDifficulty *int64 `json:"adjusted_difficulty"`
+
+	// AchievedDifficulty is the REAL proof-of-work difficulty this block's miner
+	// actually achieved (BlockHeaderResponse.GetDifficulty(), server-side sourced from
+	// acc_data.achieved_difficulty - see migrations/0011_achieved_difficulty.up.sql for
+	// the full derivation and why this is nullable: nil means "not yet
+	// captured/backfilled", never "a real zero"). Unlike Difficulty/AdjustedDifficulty
+	// above (both targets a block's PoW merely had to clear), this is the actual amount
+	// of hashing power produced for this specific block. Nil for any block indexed
+	// before that migration until backfilled (see cmd/backfill-achieved-difficulty) or
+	// if the GetHeaderByHash lookup for this block's hash failed at index time.
+	AchievedDifficulty *int64 `json:"achieved_difficulty"`
 }
 
 // UpsertBlock inserts or updates a single block row, keyed on height. Used by the
@@ -191,9 +202,9 @@ func (d *DB) UpsertBlock(ctx context.Context, b Block) error {
 			pow_algo_raw, pow_data,
 			kernel_mmr_size, output_mmr_size, total_script_offset, validator_node_mr, validator_node_size,
 			pow_algo, difficulty, kernel_count, output_count, pool_tag, reward_micro_minotari,
-			adjusted_difficulty
+			adjusted_difficulty, achieved_difficulty
 		)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26)
 		ON CONFLICT (height) DO UPDATE SET
 			hash = EXCLUDED.hash,
 			version = EXCLUDED.version,
@@ -218,14 +229,15 @@ func (d *DB) UpsertBlock(ctx context.Context, b Block) error {
 			output_count = EXCLUDED.output_count,
 			pool_tag = EXCLUDED.pool_tag,
 			reward_micro_minotari = EXCLUDED.reward_micro_minotari,
-			adjusted_difficulty = EXCLUDED.adjusted_difficulty
+			adjusted_difficulty = EXCLUDED.adjusted_difficulty,
+			achieved_difficulty = EXCLUDED.achieved_difficulty
 	`,
 		b.Height, b.Hash, b.Version, b.PrevHash, b.Timestamp,
 		nonNilBytes(b.OutputMr), nonNilBytes(b.BlockOutputMr), nonNilBytes(b.KernelMr), nonNilBytes(b.InputMr), nonNilBytes(b.TotalKernelOffset), b.Nonce,
 		b.PowAlgoRaw, nonNilBytes(b.PowData),
 		b.KernelMmrSize, b.OutputMmrSize, nonNilBytes(b.TotalScriptOffset), nonNilBytes(b.ValidatorNodeMr), b.ValidatorNodeSize,
 		b.PowAlgo, b.Difficulty, b.KernelCount, b.OutputCount, b.PoolTag, b.RewardMicroMinotari,
-		b.AdjustedDifficulty,
+		b.AdjustedDifficulty, b.AchievedDifficulty,
 	)
 	if err != nil {
 		return fmt.Errorf("db: upsert block %d: %w", b.Height, err)
@@ -242,7 +254,7 @@ const blockColumns = `
 	pow_algo_raw, pow_data,
 	kernel_mmr_size, output_mmr_size, total_script_offset, validator_node_mr, validator_node_size,
 	pow_algo, difficulty, kernel_count, output_count, pool_tag, reward_micro_minotari,
-	adjusted_difficulty
+	adjusted_difficulty, achieved_difficulty
 `
 
 // scanBlockRow scans a row shaped like blockColumns into a Block.
@@ -253,7 +265,7 @@ func scanBlockRow(row pgx.Row, b *Block) error {
 		&b.PowAlgoRaw, &b.PowData,
 		&b.KernelMmrSize, &b.OutputMmrSize, &b.TotalScriptOffset, &b.ValidatorNodeMr, &b.ValidatorNodeSize,
 		&b.PowAlgo, &b.Difficulty, &b.KernelCount, &b.OutputCount, &b.PoolTag, &b.RewardMicroMinotari,
-		&b.AdjustedDifficulty,
+		&b.AdjustedDifficulty, &b.AchievedDifficulty,
 	)
 }
 
@@ -469,6 +481,85 @@ func (d *DB) AdjustedDifficultiesForHeightRange(ctx context.Context, fromHeight,
 			return nil, fmt.Errorf("db: adjusted difficulties for height range: scan: %w", err)
 		}
 		out[height] = adjustedDifficulty
+	}
+	return out, rows.Err()
+}
+
+// SetAchievedDifficulty updates just the achieved_difficulty column for a single
+// block, keyed on height. Deliberately narrow (mirrors SetAdjustedDifficulty's own
+// rationale) rather than requiring a full UpsertBlock; this is the only method
+// cmd/backfill-achieved-difficulty touches, so a scoped backfill of this one derived
+// column never needs (or risks overwriting) any other column on the row.
+// achievedDifficulty is *int64 (not uint64) so callers can explicitly pass nil to
+// store SQL NULL - "not captured" (e.g. the GetHeaderByHash lookup for this block's
+// hash failed) - distinct from a real 0, matching this column's
+// nullable-vs-zero-meaningful convention (see
+// migrations/0011_achieved_difficulty.up.sql).
+func (d *DB) SetAchievedDifficulty(ctx context.Context, height uint64, achievedDifficulty *int64) error {
+	_, err := d.Pool.Exec(ctx, `UPDATE blocks SET achieved_difficulty = $1 WHERE height = $2`, achievedDifficulty, height)
+	if err != nil {
+		return fmt.Errorf("db: set achieved difficulty for block %d: %w", height, err)
+	}
+	return nil
+}
+
+// AchievedDifficultiesForHeightRange returns a map of height -> achieved_difficulty
+// for every block in [fromHeight, toHeight] (inclusive) - the narrow read
+// cmd/backfill-achieved-difficulty needs to diff a freshly-fetched-from-GRPC achieved
+// difficulty value against what's currently stored, so it can log/skip a no-op update
+// (see SetAchievedDifficulty) without pulling the full Block row, mirroring
+// AdjustedDifficultiesForHeightRange's exact shape/rationale one column over. Returns
+// map[uint64]*int64, not map[uint64]uint64: a nil value means the stored
+// achieved_difficulty is genuinely NULL ("not yet captured"), not a real 0 - callers
+// must treat nil and a pointer-to-0 as different states.
+func (d *DB) AchievedDifficultiesForHeightRange(ctx context.Context, fromHeight, toHeight uint64) (map[uint64]*int64, error) {
+	rows, err := d.Pool.Query(ctx, `
+		SELECT height, achieved_difficulty
+		FROM blocks
+		WHERE height BETWEEN $1 AND $2
+	`, fromHeight, toHeight)
+	if err != nil {
+		return nil, fmt.Errorf("db: achieved difficulties for height range: %w", err)
+	}
+	defer rows.Close()
+
+	out := make(map[uint64]*int64)
+	for rows.Next() {
+		var height uint64
+		var achievedDifficulty *int64
+		if err := rows.Scan(&height, &achievedDifficulty); err != nil {
+			return nil, fmt.Errorf("db: achieved difficulties for height range: scan: %w", err)
+		}
+		out[height] = achievedDifficulty
+	}
+	return out, rows.Err()
+}
+
+// HashesForHeightRange returns a map of height -> hex-encoded block hash for every
+// block in [fromHeight, toHeight] (inclusive). cmd/backfill-achieved-difficulty uses
+// this to get each already-indexed block's hash straight out of Postgres (where it's
+// already stored, see Block.Hash) rather than re-fetching the full block via GRPC
+// (GetBlockByHeight) just to read its header hash back off the wire - the hash needed
+// to call internal/nodeclient.Client.GetHeaderByHash per block in the batch.
+func (d *DB) HashesForHeightRange(ctx context.Context, fromHeight, toHeight uint64) (map[uint64]string, error) {
+	rows, err := d.Pool.Query(ctx, `
+		SELECT height, hash
+		FROM blocks
+		WHERE height BETWEEN $1 AND $2
+	`, fromHeight, toHeight)
+	if err != nil {
+		return nil, fmt.Errorf("db: hashes for height range: %w", err)
+	}
+	defer rows.Close()
+
+	out := make(map[uint64]string)
+	for rows.Next() {
+		var height uint64
+		var hash string
+		if err := rows.Scan(&height, &hash); err != nil {
+			return nil, fmt.Errorf("db: hashes for height range: scan: %w", err)
+		}
+		out[height] = hash
 	}
 	return out, rows.Err()
 }
